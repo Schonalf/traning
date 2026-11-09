@@ -38,6 +38,7 @@ h2 { font-size: 1.15rem; margin: 0.3rem 0; }
   margin: 0.5rem 0;
 }
 .warn { color: var(--warn); font-weight: 600; }
+.ok { color: var(--green); font-weight: 600; }
 .stack { display: flex; flex-direction: column; gap: 0.45rem; }
 .session-btn, .ghost, .klar, .confirm {
   border-radius: 12px;

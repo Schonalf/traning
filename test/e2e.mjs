@@ -38,6 +38,7 @@ try {
     await runWakeFallback(browser);
     await runAckPersistFailure(browser);
     await runEndMarker(browser);
+    await runFetchPlanFeedback(browser);
   } finally {
     await browser.close();
   }
@@ -545,5 +546,44 @@ async function runEndMarker(browser) {
   await page.getByTestId("abandon").click();
   const afterAbandon = await page.evaluate(async () => (await idbMarkers()).length);
   assert(afterAbandon === 1, "abandon adds no marker");
+  await context.close();
+}
+
+async function runFetchPlanFeedback(browser) {
+  const { context, page } = await newPage(browser);
+  const plan = demoPlan();
+  await page.route("https://api.github.com/**", async (route) => {
+    const url = route.request().url();
+    if (url.includes("/contents/plans/current.json")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ content: Buffer.from(JSON.stringify(plan), "utf8").toString("base64"), sha: "plan" }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "Not Found" }) });
+  });
+  await page.goto(base);
+  await page.getByTestId("nav-settings").click();
+  await page.getByTestId("owner").fill("demo-owner");
+  await page.getByTestId("repo").fill("training-data");
+  await page.getByTestId("branch").fill("main");
+  await page.getByTestId("token").fill(token);
+  await page.getByTestId("save-settings").click();
+  await page.getByTestId("fetch-plan").click();
+  const ok = await page.getByTestId("settings-ok").innerText();
+  assert(ok.startsWith("Planen hämtad:"), "missing success message: " + ok);
+  assert(ok.includes("pass"), "success should mention pass count: " + ok);
+  await page.getByTestId("repo").fill("bad-repo");
+  await page.getByTestId("save-settings").click();
+  await page.unroute("https://api.github.com/**");
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "Not Found" }) });
+  });
+  await page.getByTestId("fetch-plan").click();
+  const err = await page.getByTestId("settings-error").innerText();
+  assert(err.includes("404"), "error should include status: " + err);
+  assert(err.includes("Owner/Repo") || err.includes("arkivet"), "error should be actionable: " + err);
   await context.close();
 }

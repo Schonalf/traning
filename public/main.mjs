@@ -2,7 +2,7 @@ import { demoPlan } from "./lib/demo-plan.mjs";
 import { loadModeLabel, sideLabel } from "./lib/equipment.mjs";
 import { buildBackup } from "./lib/export.mjs";
 import { advancedAfterRest, buildActual, completionEvent, newId, sessionCompletedEvent, skippedSession } from "./lib/engine.mjs";
-import { getContentJson, planPath, validateTarget } from "./lib/github.mjs";
+import { formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
 import { elapsedSeconds, formatClock, startRest, tickRest } from "./lib/rest.mjs";
 import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
 import { applySyncResults, flushOutbox, mergeSyncedState, prepareManualRetry, readyToUpload } from "./lib/sync.mjs";
@@ -25,6 +25,7 @@ const state = {
   persistError: "",
   formError: "",
   settingsError: "",
+  settingsOk: "",
   saving: false,
   audio: null,
   wake: null,
@@ -819,6 +820,7 @@ function renderSettings() {
       el("label", {}, ["Token", token]),
       el("label", {}, [persist, "Spara token i den här webbläsaren (avstängt som standard)"]),
       state.settingsError ? text("p", state.settingsError, { class: "warn", "data-testid": "settings-error" }) : null,
+      state.settingsOk ? text("p", state.settingsOk, { class: "ok", "data-testid": "settings-ok" }) : null,
       text("p", state.token ? (state.tokenSaved ? "Token sparad lokalt." : "Token finns bara i minnet.") : "Ingen token.", { "data-testid": "token-state" }),
       el("button", { class: "ghost", type: "button", "data-testid": "save-settings", onclick: () => saveSettings({ owner, repo, branch, token, persist }) }, ["Spara inställningar"]),
       el("button", { class: "ghost", type: "button", "data-testid": "forget-token", onclick: forgetToken }, ["Glöm token"]),
@@ -834,6 +836,7 @@ async function saveSettings(fields) {
   const checked = validateTarget({ owner: fields.owner.value, repo: fields.repo.value, branch: fields.branch.value });
   if (!checked.ok) {
     state.settingsError = checked.error;
+    state.settingsOk = "";
     render();
     return;
   }
@@ -847,9 +850,11 @@ async function saveSettings(fields) {
       else stores.settings.delete("token");
     });
     state.settingsError = "";
+    state.settingsOk = "";
     state.pause = null;
   } catch {
     state.settingsError = "Inställningarna kunde inte sparas lokalt.";
+    state.settingsOk = "";
   }
   render();
 }
@@ -871,18 +876,21 @@ async function fetchPlan() {
   const checked = validateTarget(state.target);
   if (!checked.ok || !state.token) {
     state.settingsError = "Ange mål och token innan hämtning.";
+    state.settingsOk = "";
     render();
     return;
   }
   const got = await getContentJson(fetch, { target: checked.target, token: state.token, path: planPath() });
   if (got.kind !== "ok") {
-    state.settingsError = `Planen hämtades inte (${got.kind || "fel"}).`;
+    state.settingsError = formatPlanFetchError(got);
+    state.settingsOk = "";
     render();
     return;
   }
   const valid = validatePlan(got.json);
   if (!valid.ok) {
     state.settingsError = "Planen underkändes av schemat och användes inte.";
+    state.settingsOk = "";
     render();
     return;
   }
@@ -896,6 +904,7 @@ async function fetchPlan() {
   if (!state.active) state.plan = valid.plan;
   else state.fragmentNote = "Ny plan cachad. Pågående pass är oförändrat.";
   state.settingsError = "";
+  state.settingsOk = formatPlanFetchOk(valid.plan, new Date(row.validatedAt));
   render();
 }
 
