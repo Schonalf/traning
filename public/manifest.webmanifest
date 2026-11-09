@@ -1,0 +1,11 @@
+{
+  "name": "Atlas träning",
+  "short_name": "Atlas",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#0f6b4c",
+  "lang": "sv",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
