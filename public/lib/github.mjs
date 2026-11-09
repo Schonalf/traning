@@ -317,3 +317,40 @@ export async function uploadEvent(fetchImpl, { target, token, event, verifiedPri
 export function safeSyncError(result) {
   return { kind: result.kind || "unknown", status: result.status || 0, pause: result.pause || null };
 }
+
+/** Swedish, status-aware fetch-plan errors. Never includes tokens or URLs. */
+export function formatPlanFetchError(result = {}) {
+  const status = Number(result.status) || 0;
+  const kind = result.kind || "fel";
+  if (kind === "network" || status === 0) {
+    return "Nätverksfel: kunde inte nå GitHub. Kontrollera anslutningen och försök igen.";
+  }
+  if (kind === "auth" || status === 401) {
+    return `GitHub svarade ${status || 401}: ogiltig eller saknad nyckel. Skapa en ny token och klistra in den igen.`;
+  }
+  if (kind === "permission") {
+    return `GitHub svarade ${status || 403}: nyckeln saknar behörighet till arkivet. Contents behöver Read and write.`;
+  }
+  if (kind === "rate_limit") {
+    return `GitHub svarade ${status || 429}: rate limit. Vänta och försök igen.`;
+  }
+  if (kind === "server") {
+    return `GitHub svarade ${status}: tillfälligt serverfel. Försök igen om en stund.`;
+  }
+  if (status === 404 || kind === "client") {
+    const code = status || 404;
+    return `GitHub svarade ${code}: arkivet hittades inte eller nyckeln saknar åtkomst. Kontrollera Owner/Repo.`;
+  }
+  return `Planen hämtades inte (HTTP ${status || "okänd"}, ${kind}).`;
+}
+
+/** Green confirmation after a successful plan fetch. */
+export function formatPlanFetchOk(plan, when = new Date()) {
+  const title = typeof plan?.title === "string" && plan.title.trim() ? plan.title.trim() : "utan titel";
+  const n = Array.isArray(plan?.sessions) ? plan.sessions.length : 0;
+  const time =
+    when instanceof Date
+      ? when.toLocaleString("sv-SE")
+      : new Date(when).toLocaleString("sv-SE");
+  return `Planen hämtad: ${title}, ${n} pass, ${time}`;
+}

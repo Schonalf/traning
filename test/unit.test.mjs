@@ -13,6 +13,8 @@ import {
   COMPLETE_MESSAGE,
   base64ToUtf8,
   contentPath,
+  formatPlanFetchError,
+  formatPlanFetchOk,
   transportPayload,
   uploadEvent,
   utf8ToBase64,
@@ -643,6 +645,22 @@ test("verifyPrivate refuses a public repository", async () => {
   const res = await verifyPrivate(async () => jsonResponse({ private: false }, 200), TARGET, "mem");
   assert.equal(res.ok, false);
   assert.equal(res.kind, "public_repo");
+});
+
+test("plan fetch user messages are Swedish and status-aware", () => {
+  assert.match(formatPlanFetchError({ kind: "client", status: 404 }), /404/);
+  assert.match(formatPlanFetchError({ kind: "client", status: 404 }), /Owner\/Repo/);
+  assert.match(formatPlanFetchError({ kind: "auth", status: 401 }), /401/);
+  assert.match(formatPlanFetchError({ kind: "permission", status: 403 }), /behörighet/);
+  assert.match(formatPlanFetchError({ kind: "rate_limit", status: 429 }), /rate limit/);
+  assert.match(formatPlanFetchError({ kind: "server", status: 503 }), /503/);
+  assert.match(formatPlanFetchError({ kind: "network", status: 0 }), /Nätverksfel/);
+  assert.equal(formatPlanFetchError({ kind: "client", status: 404 }).includes("https://"), false);
+  assert.equal(formatPlanFetchError({ kind: "auth", status: 401 }).includes("gho_"), false);
+  const when = new Date("2026-11-09T19:40:00.000Z");
+  const ok = formatPlanFetchOk({ title: "Block 1", sessions: [{}, {}, {}, {}] }, when);
+  assert.match(ok, /^Planen hämtad: Block 1, 4 pass,/);
+  assert.match(formatPlanFetchOk({ title: "  ", sessions: [] }, when), /utan titel, 0 pass/);
 });
 
 function jsonResponse(body, status, headers = {}) {
