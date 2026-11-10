@@ -18,7 +18,7 @@ const ALLOW = new Set([
 ]);
 
 const CACHE_PREFIX = `atlas-static-${encodeURIComponent(self.registration.scope)}-`;
-const CACHE = `${CACHE_PREFIX}v6`;
+const CACHE = `${CACHE_PREFIX}v7`;
 
 function scopePrefix() {
   const pathname = new URL(self.registration.scope).pathname;

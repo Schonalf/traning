@@ -150,6 +150,7 @@ export function demoPlan() {
             supersetGroup: "bröst",
             supersetOrder: 1,
             notes: "DEMO superset, del 1.",
+            alternative: "Om hantlarna är upptagna: armhävningar, samma reps.",
           }),
           step({
             id: "s3-ss-fly",

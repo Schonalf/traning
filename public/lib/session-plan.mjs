@@ -41,24 +41,29 @@ export function groupSteps(steps) {
   return groups;
 }
 
-export function selectSessionSteps(catalog, mode = "full") {
-  const steps = Array.isArray(catalog?.steps) ? catalog.steps : [];
-  const groups = groupSteps(steps);
-  if (mode !== "quick") {
-    return { mode: "full", steps: steps.slice(), omittedExercises: [], groups };
-  }
+function stepsForPriority(groups, include) {
   const included = [];
   const omittedExercises = [];
   for (const group of groups) {
-    if (group.priority === 1) included.push(...group.steps);
+    if (include(group.priority)) included.push(...group.steps);
     else omittedExercises.push(group.title);
   }
-  return {
-    mode: "quick",
-    steps: included,
-    omittedExercises,
-    groups: groupSteps(included),
-  };
+  return { included, omittedExercises, groups: groupSteps(included) };
+}
+
+/** full = every step. base = priority 1 and 2. quick = legacy priority-1-only. */
+export function selectSessionSteps(catalog, mode = "full") {
+  const steps = Array.isArray(catalog?.steps) ? catalog.steps : [];
+  const groups = groupSteps(steps);
+  if (mode === "quick") {
+    const picked = stepsForPriority(groups, (priority) => priority === 1);
+    return { mode: "quick", steps: picked.included, omittedExercises: picked.omittedExercises, groups: picked.groups };
+  }
+  if (mode === "base") {
+    const picked = stepsForPriority(groups, (priority) => priority <= 2);
+    return { mode: "base", steps: picked.included, omittedExercises: picked.omittedExercises, groups: picked.groups };
+  }
+  return { mode: "full", steps: steps.slice(), omittedExercises: [], groups };
 }
 
 export function estimateStepSeconds(step) {
@@ -78,16 +83,27 @@ export function formatEstimatedDuration(seconds) {
   return `ca ${minutes} min`;
 }
 
+export function estimatedMinutes(seconds) {
+  return Math.max(1, Math.round(Math.max(0, Number(seconds) || 0) / 60));
+}
+
 export function sessionEstimates(catalog) {
   const full = selectSessionSteps(catalog, "full");
+  const base = selectSessionSteps(catalog, "base");
   const quick = selectSessionSteps(catalog, "quick");
+  const fullSeconds = estimateSessionSeconds(full.steps);
+  const baseSeconds = estimateSessionSeconds(base.steps);
+  const quickSeconds = estimateSessionSeconds(quick.steps);
   return {
-    fullSeconds: estimateSessionSeconds(full.steps),
-    quickSeconds: estimateSessionSeconds(quick.steps),
-    fullLabel: formatEstimatedDuration(estimateSessionSeconds(full.steps)),
-    quickLabel: formatEstimatedDuration(estimateSessionSeconds(quick.steps)),
+    fullSeconds,
+    baseSeconds,
+    quickSeconds,
+    fullLabel: formatEstimatedDuration(fullSeconds),
+    baseLabel: formatEstimatedDuration(baseSeconds),
+    quickLabel: formatEstimatedDuration(quickSeconds),
+    baseCount: base.steps.length,
     quickCount: quick.steps.length,
-    omittedExercises: quick.omittedExercises,
+    omittedExercises: base.omittedExercises,
   };
 }
 

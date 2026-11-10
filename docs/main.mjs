@@ -8,6 +8,7 @@ import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
 import {
   PRIORITY_LABELS,
   endSessionEarly,
+  estimatedMinutes,
   prepareSessionSnapshot,
   selectSessionSteps,
   sessionEstimates,
@@ -448,7 +449,7 @@ function renderHome() {
 let starting = false;
 function openPreview(catalog) {
   if (state.active) return;
-  state.preview = { catalog, mode: "full" };
+  state.preview = { catalog, mode: "base" };
   state.view = "preview";
   state.persistError = "";
   render();
@@ -466,24 +467,47 @@ function setPreviewMode(mode) {
   render();
 }
 
+function previewMode(value) {
+  if (value === "base" || value === "full" || value === "quick") return value;
+  return "base";
+}
+
+function stepExtraLines(step) {
+  const lines = [];
+  if (step.supersetGroup) {
+    const part = step.supersetOrder ? ` del ${step.supersetOrder}` : "";
+    lines.push(text("p", `Superset${part}. Vila enligt steget och byt inte station mitt i varvet.`, { class: "muted", "data-testid": "step-superset" }));
+  }
+  if (step.alternative) {
+    lines.push(text("p", `Alternativ: ${step.alternative}`, { class: "muted", "data-testid": "step-alternative" }));
+  }
+  return lines;
+}
+
 function previewStepLines(step) {
   const rest = step.restSeconds ? `Vila ${step.restSeconds} s` : "Ingen vila";
   const duration = step.durationSeconds != null ? `Tid ${step.durationSeconds} s` : null;
   return el("div", { class: "step-line", "data-testid": `preview-step-${step.id}` }, [
     text("p", `${phaseLabel(step.phase)}: ${weightLine(step)}. ${duration || repsLine(step)}. ${rest}`),
     step.notes ? text("p", step.notes, { class: "muted" }) : null,
+    ...stepExtraLines(step),
   ]);
 }
 
 function renderPreview() {
   const catalog = state.preview.catalog;
-  const mode = state.preview.mode === "quick" ? "quick" : "full";
+  const mode = previewMode(state.preview.mode);
   const estimates = sessionEstimates(catalog);
   const selected = selectSessionSteps(catalog, mode);
   const groups = selected.groups;
   const list = el("div", { "data-testid": "preview-exercises" });
   if (!groups.length) {
-    list.append(text("p", "Snabbpasset har inga kärnövningar i den här planen.", { class: "warn", "data-testid": "preview-empty" }));
+    const empty = mode === "quick"
+      ? "Det äldre snabbpasset har inga kärnövningar i den här planen."
+      : mode === "base"
+        ? "Baspasset har inga steg med prioritet 1 eller 2."
+        : "Passet har inga steg.";
+    list.append(text("p", empty, { class: "warn", "data-testid": "preview-empty" }));
   }
   for (const group of groups) {
     const badge = text("span", PRIORITY_LABELS[group.priority] || PRIORITY_LABELS[2], { class: `prio prio-${group.priority}` });
@@ -493,11 +517,12 @@ function renderPreview() {
     for (const step of group.steps) block.append(previewStepLines(step));
     list.append(block);
   }
-  if (mode === "quick" && selected.omittedExercises.length) {
+  if ((mode === "base" || mode === "quick") && selected.omittedExercises.length) {
+    const label = mode === "quick" ? "Hoppas över" : "Bara i fullpass";
     list.append(
       text(
         "p",
-        `Hoppas över: ${selected.omittedExercises.join(", ")}.`,
+        `${label}: ${selected.omittedExercises.join(", ")}.`,
         { class: "muted", "data-testid": "preview-omitted" }
       )
     );
@@ -505,8 +530,10 @@ function renderPreview() {
   const canStart = selected.steps.length > 0;
   const startButton = canStart
     ? el("button", { class: "klar", type: "button", "data-testid": "confirm-start", onclick: () => startSession(catalog, { mode }) }, ["Start"])
-    : text("p", "Välj Fullt pass eller en plan med kärnövningar för att kunna starta.", { class: "warn" });
+    : text("p", "Välj ett läge som har steg för att kunna starta.", { class: "warn" });
   const backButton = el("button", { class: "ghost", type: "button", "data-testid": "preview-back", onclick: closePreview }, ["Tillbaka"]);
+  const baseLabel = `Baspass (~${estimatedMinutes(estimates.baseSeconds)} min)`;
+  const fullLabel = `Fullpass (~${estimatedMinutes(estimates.fullSeconds)} min)`;
   app.append(
     el("section", { class: "card", "data-testid": "preview-view" }, [
       text("p", `${catalog.location} · ${selected.steps.length} steg i valt läge`, { class: "muted", "data-testid": "preview-meta" }),
@@ -515,21 +542,17 @@ function renderPreview() {
         el("button", {
           type: "button",
           class: "ghost",
-          "data-testid": "mode-full",
-          "aria-pressed": mode === "full" ? "true" : "false",
-          onclick: () => setPreviewMode("full"),
-        }, ["Fullt pass"]),
+          "data-testid": "mode-base",
+          "aria-pressed": mode === "base" ? "true" : "false",
+          onclick: () => setPreviewMode("base"),
+        }, [baseLabel]),
         el("button", {
           type: "button",
           class: "ghost",
-          "data-testid": "mode-quick",
-          "aria-pressed": mode === "quick" ? "true" : "false",
-          onclick: () => setPreviewMode("quick"),
-        }, ["Snabbpass"]),
-      ]),
-      el("div", { class: "preview-times" }, [
-        text("p", `Fullt pass: ${estimates.fullLabel}`, { "data-testid": "time-full" }),
-        text("p", `Snabbpass: ${estimates.quickLabel}`, { "data-testid": "time-quick" }),
+          "data-testid": "mode-full",
+          "aria-pressed": mode === "full" ? "true" : "false",
+          onclick: () => setPreviewMode("full"),
+        }, [fullLabel]),
       ]),
       el("div", { class: "stack preview-actions" }, [startButton, backButton]),
       list,
@@ -596,6 +619,7 @@ function renderSession() {
     text("p", `RIR: ${step.rir == null ? "valfritt" : step.rir}`),
     step.durationSeconds != null ? text("p", `Tid: ${step.durationSeconds} s`, { "data-testid": "duration-prescribed" }) : null,
     step.notes ? text("p", step.notes, { class: "muted" }) : null,
+    ...stepExtraLines(step),
   ]);
   const card = el("section", { class: "card", "data-testid": "step-view" }, [
     text("p", `${session.stepIndex + 1} / ${session.planSnapshot.steps.length}`, { class: "muted" }),
@@ -867,6 +891,7 @@ function renderRest() {
     text("p", repsLine(nextStep)),
     text("p", `RIR: ${nextStep.rir == null ? "valfritt" : nextStep.rir}`),
     nextStep.durationSeconds != null ? text("p", `Tid: ${nextStep.durationSeconds} s`) : null,
+    nextStep.alternative ? text("p", `Alternativ: ${nextStep.alternative}`, { class: "muted", "data-testid": "step-alternative" }) : null,
     clock,
     text("p", "Låst skärm: pipet är inte garanterat.", { class: "muted" }),
     el("button", { class: "ghost end-early", type: "button", "data-testid": "end-early", onclick: openEndEarlyDialog }, ["Avsluta passet nu (tidsnöd)"]),

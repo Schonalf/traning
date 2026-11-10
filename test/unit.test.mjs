@@ -23,7 +23,7 @@ import {
 } from "../public/lib/github.mjs";
 import { elapsedSeconds, startRest, tickRest } from "../public/lib/rest.mjs";
 import { decodePlanFragment, MAX_FRAGMENT_CHARS, normalizeSteps, prescribedWeight, validatePlan } from "../public/lib/schema.mjs";
-import { endSessionEarly, estimateSessionSeconds, formatEstimatedDuration, groupSteps, selectSessionSteps, sessionEstimates, stepPriority, unperformedStepIds } from "../public/lib/session-plan.mjs";
+import { endSessionEarly, estimateSessionSeconds, estimatedMinutes, formatEstimatedDuration, groupSteps, selectSessionSteps, sessionEstimates, stepPriority, unperformedStepIds } from "../public/lib/session-plan.mjs";
 import { applySyncResults, flushOutbox, prepareManualRetry, readyToUpload } from "../public/lib/sync.mjs";
 
 const TARGET = { owner: "demo-owner", repo: "training-data", branch: "main" };
@@ -362,6 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
+  assert.match(sw, /CACHE_PREFIX\}v7/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -769,8 +770,31 @@ test("quick session keeps prio 1 warmups and plan order, and omits the rest", ()
   assert.equal(groupSteps(catalog.steps).find((group) => group.key === "Sittande vadpress").priority, 1);
   const estimates = sessionEstimates(catalog);
   assert.ok(estimates.fullSeconds > estimates.quickSeconds);
+  assert.ok(estimates.fullSeconds >= estimates.baseSeconds);
+  assert.ok(estimates.baseSeconds >= estimates.quickSeconds);
   assert.match(estimates.fullLabel, /^ca \d+ min$/);
+  assert.match(estimates.baseLabel, /^ca \d+ min$/);
+  assert.equal(estimatedMinutes(estimates.baseSeconds), Math.round(estimates.baseSeconds / 60));
   assert.match(formatEstimatedDuration(estimateSessionSeconds(quick.steps)), /^ca \d+ min$/);
+  const base = selectSessionSteps(catalog, "base");
+  assert.deepEqual(
+    base.steps.map((step) => step.id),
+    ["press-wu", "press-1", "dips-1", "no-prio", "calf-wu-l", "calf-wu-r", "calf-1", "wrist-1"]
+  );
+  assert.deepEqual(base.omittedExercises, ["Lutande hantelflyes"]);
+  assert.equal(base.mode, "base");
+});
+
+test("alternative is optional, preserved, and rejected when too long", () => {
+  const plan = demoPlan();
+  const kept = validatePlan(plan);
+  assert.equal(kept.ok, true);
+  assert.equal(kept.plan.sessions[2].steps[1].alternative, "Om hantlarna är upptagna: armhävningar, samma reps.");
+  assert.equal(kept.plan.sessions[0].steps[0].alternative, null);
+  plan.sessions[2].steps[1].alternative = "x".repeat(181);
+  assert.equal(validatePlan(plan).ok, false);
+  delete plan.sessions[2].steps[1].alternative;
+  assert.equal(validatePlan(plan).ok, true);
 });
 
 test("early-end payload marks time pressure and leaves the completed.json path unchanged", () => {
@@ -808,6 +832,25 @@ test("early-end payload marks time pressure and leaves the completed.json path u
   assert.equal(clean.mode, "quick");
   assert.equal(clean.token, undefined);
   assert.equal(clean.attempts, undefined);
+  const baseMarker = sessionCompletedEvent({
+    session: { ...finished, mode: "base", omittedExercises: ["Hantelflyes"] },
+    events: [set],
+    nowIso: finished.completedAt,
+    eventId: EID,
+  });
+  assert.equal(baseMarker.mode, "base");
+  assert.deepEqual(baseMarker.omittedExercises, ["Hantelflyes"]);
+  assert.equal(baseMarker.endedEarly, true);
+  assert.equal(baseMarker.endReason, "time_pressure");
+  const fullMarker = sessionCompletedEvent({
+    session: { id: SID, mode: "full", omittedExercises: ["ska inte med"], skipped: [], title: "S3" },
+    events: [set],
+    nowIso: finished.completedAt,
+    eventId: EID,
+  });
+  assert.equal(fullMarker.mode, "full");
+  assert.equal("omittedExercises" in fullMarker, false);
+  assert.equal("endedEarly" in fullMarker, false);
   const duringRest = unperformedStepIds({ ...session, phase: "rest", stepIndex: 1 });
   assert.deepEqual(duringRest, ["calf-1", "wrist-1"]);
   const normal = sessionCompletedEvent({

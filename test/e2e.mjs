@@ -108,9 +108,10 @@ async function newPage(browser, { audio = false } = {}) {
   return { context, page };
 }
 
-async function startSessionFromHome(page, id) {
+async function startSessionFromHome(page, id, mode = "base") {
   await page.getByTestId(`start-${id}`).click();
   await page.getByTestId("preview-view").waitFor();
+  if (mode === "full") await page.getByTestId("mode-full").click();
   await page.getByTestId("confirm-start").click();
 }
 
@@ -291,7 +292,7 @@ async function runHappy(browser) {
 async function runMobility(browser) {
   const { context, page } = await newPage(browser);
   await page.goto(base);
-  await startSessionFromHome(page, "kondition");
+  await startSessionFromHome(page, "kondition", "full");
   await page.getByTestId("duration-clock").waitFor();
   await page.screenshot({ path: `${shots}/mobility-timer.png` });
   const before = await page.getByTestId("exercise").innerText();
@@ -617,25 +618,31 @@ async function runPreviewAndEarlyEnd(browser) {
   await page.getByTestId("start-styrka-3").click();
   await page.getByTestId("preview-view").waitFor();
   assert((await sessionCount(page)) === 0, "preview must not create a session");
-  assert((await page.getByTestId("time-full").innerText()).includes("ca"), "full duration");
-  assert((await page.getByTestId("time-quick").innerText()).includes("ca"), "quick duration");
+  const baseText = await page.getByTestId("mode-base").innerText();
+  const fullText = await page.getByTestId("mode-full").innerText();
+  assert(/^Baspass \(~\d+ min\)$/.test(baseText), "base choice: " + baseText);
+  assert(/^Fullpass \(~\d+ min\)$/.test(fullText), "full choice: " + fullText);
+  assert((await page.getByTestId("mode-base").getAttribute("aria-pressed")) === "true", "base is the default");
   const body = await page.locator("body").innerText();
   assert(body.includes("Sittande vadpress"), "preview lists calf work");
   assert(body.includes("Uppvärmning") || body.includes("Arbetsset"), "preview lists phases");
+  assert(body.includes("Alternativ:"), "preview shows an equipment alternative");
   assert((await page.getByTestId("confirm-start").innerText()) === "Start", "start button visible");
   assert((await page.getByTestId("preview-back").innerText()) === "Tillbaka", "back button visible");
+  await page.screenshot({ path: `${shots}/preview-v7.png` });
   await page.screenshot({ path: `${shots}/preview.png` });
-  await page.getByTestId("mode-quick").click();
-  await page.getByTestId("preview-omitted").waitFor();
   const omitted = await page.getByTestId("preview-omitted").innerText();
-  assert(omitted.includes("Hantelflyes") || omitted.includes("Farmarbärning"), "quick mode lists omitted work");
+  assert(omitted.includes("Hantelflyes") || omitted.includes("Farmarbärning"), "base mode lists full-only work: " + omitted);
+  await page.getByTestId("mode-full").click();
+  assert((await page.getByTestId("mode-full").getAttribute("aria-pressed")) === "true", "full selected");
+  assert((await page.getByTestId("preview-omitted").count()) === 0, "full pass omits nothing");
   assert((await sessionCount(page)) === 0, "mode toggle must not create a session");
   await page.getByTestId("preview-back").click();
   await page.getByTestId("start-styrka-3").waitFor();
   assert((await sessionCount(page)) === 0, "back from preview leaves no session");
 
   await page.getByTestId("start-styrka-3").click();
-  await page.getByTestId("mode-quick").click();
+  await page.getByTestId("mode-base").click();
   await page.getByTestId("confirm-start").click();
   await page.getByTestId("step-view").waitFor();
   assert((await sessionCount(page)) === 1, "start from preview creates one session");
@@ -650,7 +657,7 @@ async function runPreviewAndEarlyEnd(browser) {
   assert(marker.endedEarly === true, "endedEarly");
   assert(marker.endReason === "time_pressure", "endReason");
   assert(Array.isArray(marker.unperformedStepIds) && marker.unperformedStepIds.length > 0, "unperformed steps");
-  assert(marker.mode === "quick", "quick mode recorded");
+  assert(marker.mode === "base", "base mode recorded");
   assert(Array.isArray(marker.omittedExercises), "omitted exercises recorded");
   await context.close();
 }

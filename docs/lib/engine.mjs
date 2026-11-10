@@ -103,8 +103,10 @@ export function sessionCompletedEvent({ session, events, nowIso, eventId }) {
     record.endReason = session.endReason || "time_pressure";
     record.unperformedStepIds = unperformed;
   }
-  if (session.mode === "quick") {
-    record.mode = "quick";
+  if (session.mode === "base" || session.mode === "full" || session.mode === "quick") {
+    record.mode = session.mode;
+  }
+  if (session.mode === "base" || session.mode === "quick") {
     record.omittedExercises = [...(session.omittedExercises || [])];
   }
   return record;
