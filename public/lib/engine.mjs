@@ -82,7 +82,8 @@ export function sessionCompletedEvent({ session, events, nowIso, eventId }) {
     .filter((item) => item.sessionId === session.id && (item.type === "completion" || item.type === "revision"))
     .map((item) => item.eventId);
   const skippedStepIds = [...(session.skipped || [])];
-  return {
+  const unperformed = [...(session.unperformedStepIds || [])];
+  const record = {
     eventId,
     sessionId: session.id,
     type: "session_completed",
@@ -93,10 +94,21 @@ export function sessionCompletedEvent({ session, events, nowIso, eventId }) {
     sessionType: session.sessionType || "",
     planDemo: Boolean(session.planDemo),
     completedAt: nowIso,
-    outcome: skippedStepIds.length > 0 || setEventIds.length === 0 ? "completed_with_skips" : "completed",
+    outcome: skippedStepIds.length > 0 || setEventIds.length === 0 || unperformed.length > 0 ? "completed_with_skips" : "completed",
     setEventIds,
     skippedStepIds,
   };
+  if (session.endedEarly) {
+    record.endedEarly = true;
+    record.endReason = session.endReason || "time_pressure";
+    record.unperformedStepIds = unperformed;
+  }
+  if (session.mode === "quick") {
+    record.mode = "quick";
+    record.omittedExercises = [...(session.omittedExercises || [])];
+  }
+  return record;
+
 }
 
 export function skippedSession(session, now) {

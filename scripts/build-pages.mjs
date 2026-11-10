@@ -19,6 +19,7 @@ const files = [
   "lib/export.mjs",
   "lib/demo-plan.mjs",
   "lib/sync.mjs",
+  "lib/session-plan.mjs",
 ];
 
 await rm(docs, { recursive: true, force: true });

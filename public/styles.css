@@ -76,3 +76,38 @@ dialog::backdrop { background: rgba(28, 25, 21, 0.45); }
 .demo-flag { font-weight: 700; }
 .row { display: flex; gap: 0.4rem; }
 .row > * { flex: 1; }
+
+.mode-toggle { display: flex; gap: 0.4rem; margin: 0.5rem 0; }
+.mode-toggle button { flex: 1; text-align: center; }
+.mode-toggle button[aria-pressed="true"] {
+  background: var(--green);
+  color: var(--green-ink);
+  border-color: var(--green);
+  font-weight: 700;
+}
+.preview-times { display: flex; gap: 0.6rem; margin: 0.3rem 0 0.6rem; }
+.preview-times p { flex: 1; margin: 0; }
+.exercise-block { margin: 0.7rem 0 0.2rem; }
+.exercise-block h3 { margin: 0 0 0.35rem; font-size: 1.05rem; }
+.step-line { margin: 0.2rem 0; font-size: 0.95rem; }
+.prio {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  margin-left: 0.35rem;
+  vertical-align: middle;
+  border: 1px solid var(--line);
+}
+.prio-1 { background: #0f6b4c; color: #fff; border-color: #0f6b4c; }
+.prio-2 { background: #efe7d6; color: var(--ink); }
+.prio-3 { background: #fff; color: var(--muted); }
+.end-early {
+  text-align: center;
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 700;
+}
+.preview-actions { margin-top: 0.8rem; }

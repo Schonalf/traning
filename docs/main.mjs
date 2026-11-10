@@ -5,6 +5,13 @@ import { advancedAfterRest, buildActual, completionEvent, newId, sessionComplete
 import { formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
 import { elapsedSeconds, formatClock, startRest, tickRest } from "./lib/rest.mjs";
 import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
+import {
+  PRIORITY_LABELS,
+  endSessionEarly,
+  prepareSessionSnapshot,
+  selectSessionSteps,
+  sessionEstimates,
+} from "./lib/session-plan.mjs";
 import { applySyncResults, flushOutbox, mergeSyncedState, prepareManualRetry, readyToUpload } from "./lib/sync.mjs";
 
 const DB_NAME = "atlas-training-guided";
@@ -21,6 +28,8 @@ const state = {
   tokenSaved: false,
   target: { owner: "", repo: "", branch: "main" },
   view: "home",
+  previousView: "home",
+  preview: null,
   pause: null,
   persistError: "",
   formError: "",
@@ -374,6 +383,7 @@ function showPersistBanner() {
 
 function headingTitle() {
   if (state.active?.title) return state.active.title;
+  if (state.view === "preview" && state.preview?.catalog?.title) return state.preview.catalog.title;
   const done = state.sessions.find((item) => item.id === state.focusId && item.phase === "done");
   if (done?.title) return done.title;
   return "Atlas träning";
@@ -386,7 +396,7 @@ function render() {
   app.append(
     el("header", { class: "top" }, [
       text("h1", headingTitle(), { "data-testid": "title" }),
-      el("button", { class: "ghost", type: "button", "data-testid": "nav-settings", onclick: () => { state.view = state.view === "settings" ? "home" : "settings"; render(); } }, [
+      el("button", { class: "ghost", type: "button", "data-testid": "nav-settings", onclick: toggleSettings }, [
         state.view === "settings" ? "Stäng" : "Inställningar",
       ]),
     ]),
@@ -395,11 +405,22 @@ function render() {
   if (state.persistError) app.append(text("p", state.persistError, { class: "warn", "data-testid": "persist-error" }));
   if (state.view === "settings") return renderSettings();
   if (state.active) return renderSession();
+  if (state.view === "preview" && state.preview) return renderPreview();
   if (state.focusId) {
     const done = state.sessions.find((item) => item.id === state.focusId && item.phase === "done");
     if (done) return renderDone(done);
   }
   return renderHome();
+}
+
+function toggleSettings() {
+  if (state.view === "settings") {
+    state.view = state.previousView || "home";
+  } else {
+    state.previousView = state.view;
+    state.view = "settings";
+  }
+  render();
 }
 
 function renderHome() {
@@ -418,15 +439,112 @@ function renderHome() {
         class: "session-btn",
         type: "button",
         "data-testid": `start-${session.id}`,
-        onclick: () => startSession(session),
-      }, [text("strong", session.title), text("div", `${session.location} · ${session.steps.length} steg`, { class: "muted" })])
+        onclick: () => openPreview(session),
+      }, [text("strong", session.title), text("div", `${session.location} · ${session.steps.length} steg · tryck för att se passet`, { class: "muted" })])
     );
   }
 }
 
 let starting = false;
-async function startSession(catalog) {
+function openPreview(catalog) {
+  if (state.active) return;
+  state.preview = { catalog, mode: "full" };
+  state.view = "preview";
+  state.persistError = "";
+  render();
+}
+
+function closePreview() {
+  state.preview = null;
+  state.view = "home";
+  render();
+}
+
+function setPreviewMode(mode) {
+  if (!state.preview) return;
+  state.preview = { ...state.preview, mode };
+  render();
+}
+
+function previewStepLines(step) {
+  const rest = step.restSeconds ? `Vila ${step.restSeconds} s` : "Ingen vila";
+  const duration = step.durationSeconds != null ? `Tid ${step.durationSeconds} s` : null;
+  return el("div", { class: "step-line", "data-testid": `preview-step-${step.id}` }, [
+    text("p", `${phaseLabel(step.phase)}: ${weightLine(step)}. ${duration || repsLine(step)}. ${rest}`),
+    step.notes ? text("p", step.notes, { class: "muted" }) : null,
+  ]);
+}
+
+function renderPreview() {
+  const catalog = state.preview.catalog;
+  const mode = state.preview.mode === "quick" ? "quick" : "full";
+  const estimates = sessionEstimates(catalog);
+  const selected = selectSessionSteps(catalog, mode);
+  const groups = selected.groups;
+  const list = el("div", { "data-testid": "preview-exercises" });
+  if (!groups.length) {
+    list.append(text("p", "Snabbpasset har inga kärnövningar i den här planen.", { class: "warn", "data-testid": "preview-empty" }));
+  }
+  for (const group of groups) {
+    const badge = text("span", PRIORITY_LABELS[group.priority] || PRIORITY_LABELS[2], { class: `prio prio-${group.priority}` });
+    const block = el("div", { class: "exercise-block", "data-testid": `preview-exercise-${group.key}` }, [
+      el("h3", {}, [group.title, badge]),
+    ]);
+    for (const step of group.steps) block.append(previewStepLines(step));
+    list.append(block);
+  }
+  if (mode === "quick" && selected.omittedExercises.length) {
+    list.append(
+      text(
+        "p",
+        `Hoppas över: ${selected.omittedExercises.join(", ")}.`,
+        { class: "muted", "data-testid": "preview-omitted" }
+      )
+    );
+  }
+  const canStart = selected.steps.length > 0;
+  const startButton = canStart
+    ? el("button", { class: "klar", type: "button", "data-testid": "confirm-start", onclick: () => startSession(catalog, { mode }) }, ["Start"])
+    : text("p", "Välj Fullt pass eller en plan med kärnövningar för att kunna starta.", { class: "warn" });
+  const backButton = el("button", { class: "ghost", type: "button", "data-testid": "preview-back", onclick: closePreview }, ["Tillbaka"]);
+  app.append(
+    el("section", { class: "card", "data-testid": "preview-view" }, [
+      text("p", `${catalog.location} · ${selected.steps.length} steg i valt läge`, { class: "muted", "data-testid": "preview-meta" }),
+      text("p", "Inget pass startas förrän du trycker Start.", { class: "muted" }),
+      el("div", { class: "mode-toggle", role: "group", "aria-label": "Passläge" }, [
+        el("button", {
+          type: "button",
+          class: "ghost",
+          "data-testid": "mode-full",
+          "aria-pressed": mode === "full" ? "true" : "false",
+          onclick: () => setPreviewMode("full"),
+        }, ["Fullt pass"]),
+        el("button", {
+          type: "button",
+          class: "ghost",
+          "data-testid": "mode-quick",
+          "aria-pressed": mode === "quick" ? "true" : "false",
+          onclick: () => setPreviewMode("quick"),
+        }, ["Snabbpass"]),
+      ]),
+      el("div", { class: "preview-times" }, [
+        text("p", `Fullt pass: ${estimates.fullLabel}`, { "data-testid": "time-full" }),
+        text("p", `Snabbpass: ${estimates.quickLabel}`, { "data-testid": "time-quick" }),
+      ]),
+      el("div", { class: "stack preview-actions" }, [startButton, backButton]),
+      list,
+    ])
+  );
+}
+
+async function startSession(catalog, { mode = "full" } = {}) {
   if (starting || state.active) return;
+  const prepared = prepareSessionSnapshot(catalog, mode);
+  if (!prepared.catalog.steps.length) {
+    state.persistError = "Inga steg att starta i valt läge.";
+    render();
+    return;
+  }
   starting = true;
   unlockAudio();
   try {
@@ -438,7 +556,7 @@ async function startSession(catalog) {
     sessionType: catalog.type,
     planId: state.plan.id,
     planDemo: Boolean(state.plan.demo),
-    planSnapshot: structuredClone(catalog),
+    planSnapshot: structuredClone(prepared.catalog),
     stepIndex: 0,
     phase: "step",
     rest: null,
@@ -446,10 +564,13 @@ async function startSession(catalog) {
     skipped: [],
     stepStartedAt: Date.now(),
     revisions: {},
+    mode: prepared.mode,
+    omittedExercises: prepared.omittedExercises,
   };
   try {
     await saveSession(session);
     state.persistError = "";
+    state.preview = null;
     state.view = "home";
   } catch {
     state.persistError = "Kunde inte spara passet lokalt. Inget startades.";
@@ -490,6 +611,7 @@ function renderSession() {
       el("button", { class: "klar", type: "button", "data-testid": "klar", onclick: () => openDialog() }, ["Klar"]),
       el("button", { class: "ghost", type: "button", "data-testid": "skip", onclick: skipStep }, ["Hoppa över utan att markera klar"]),
       el("button", { class: "ghost", type: "button", "data-testid": "abandon", onclick: abandon }, ["Avbryt pass"]),
+      el("button", { class: "ghost end-early", type: "button", "data-testid": "end-early", onclick: openEndEarlyDialog }, ["Avsluta passet nu (tidsnöd)"]),
     ])
   );
   card.append(text("p", state.wakeNote || "Om skärmlåset saknas: håll skärmen tänd manuellt.", { class: state.wakeNote ? "warn" : "muted", "data-testid": "wake-note" }));
@@ -693,6 +815,43 @@ async function abandon() {
   render();
 }
 
+function openEndEarlyDialog() {
+  if (!state.active || state.saving) return;
+  const dialog = el("dialog", { "data-testid": "end-early-dialog" });
+  dialog.append(
+    text("h2", "Avsluta passet nu?"),
+    text("p", "Det räknas som tidsnöd. Utförda set sparas och resten markeras som inte utförda.", { class: "muted" }),
+    el("button", { class: "end-early", type: "button", "data-testid": "confirm-end-early", onclick: () => confirmEndEarly(dialog) }, ["Avsluta nu"]),
+    el("button", { class: "ghost", type: "button", "data-testid": "cancel-end-early", onclick: () => dialog.close() }, ["Fortsätt passet"])
+  );
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.showModal();
+}
+
+async function confirmEndEarly(dialog) {
+  if (!state.active || state.saving) return;
+  state.saving = true;
+  const button = dialog.querySelector("[data-testid=confirm-end-early]");
+  if (button) button.disabled = true;
+  const next = endSessionEarly(state.active, new Date().toISOString());
+  const marker = markerForFinish(next, []);
+  try {
+    await atomicWrite(next, marker ? [marker] : []);
+    await releaseWake();
+    state.persistError = "";
+    state.saving = false;
+    dialog.close();
+    render();
+    flush().catch(() => {});
+  } catch {
+    state.saving = false;
+    if (button) button.disabled = false;
+    state.persistError = "Kunde inte avsluta passet. Det är kvar.";
+    render();
+  }
+}
+
 let restTimer = 0;
 function renderRest() {
   clearInterval(restTimer);
@@ -710,6 +869,7 @@ function renderRest() {
     nextStep.durationSeconds != null ? text("p", `Tid: ${nextStep.durationSeconds} s`) : null,
     clock,
     text("p", "Låst skärm: pipet är inte garanterat.", { class: "muted" }),
+    el("button", { class: "ghost end-early", type: "button", "data-testid": "end-early", onclick: openEndEarlyDialog }, ["Avsluta passet nu (tidsnöd)"]),
   ]);
   app.append(card);
   let restBusy = false;
