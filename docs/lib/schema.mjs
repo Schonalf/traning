@@ -130,6 +130,11 @@ function sanitizeStep(step, index, errors) {
     allowNull: true,
   });
   const notes = step.notes == null ? "" : stringField(step.notes, path + ".notes", errors, { required: false }) || "";
+  let priority = 2;
+  if (step.priority != null) {
+    priority = optionalNumber(step.priority, path + ".priority", errors, { min: 1, max: 3, integer: true, allowNull: false });
+    if (priority == null) priority = 2;
+  }
   let supersetGroup = null;
   if (step.supersetGroup != null) {
     supersetGroup = stringField(step.supersetGroup, path + ".supersetGroup", errors);
@@ -154,6 +159,7 @@ function sanitizeStep(step, index, errors) {
     durationSeconds,
     restSeconds: restSeconds == null ? 0 : restSeconds,
     notes,
+    priority,
     supersetGroup,
     supersetOrder,
   };

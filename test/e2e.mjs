@@ -39,6 +39,7 @@ try {
     await runAckPersistFailure(browser);
     await runEndMarker(browser);
     await runFetchPlanFeedback(browser);
+    await runPreviewAndEarlyEnd(browser);
   } finally {
     await browser.close();
   }
@@ -105,6 +106,25 @@ async function newPage(browser, { audio = false } = {}) {
     if (text.includes(token)) throw new Error("token leaked to console");
   });
   return { context, page };
+}
+
+async function startSessionFromHome(page, id) {
+  await page.getByTestId(`start-${id}`).click();
+  await page.getByTestId("preview-view").waitFor();
+  await page.getByTestId("confirm-start").click();
+}
+
+async function sessionCount(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const request = indexedDB.open("atlas-training-guided");
+        request.onsuccess = () => {
+          const tx = request.result.transaction("sessions").objectStore("sessions").getAll();
+          tx.onsuccess = () => resolve(tx.result.length);
+        };
+      })
+  );
 }
 
 async function runShellPaths(browser) {
@@ -183,7 +203,7 @@ async function runShellPaths(browser) {
   await context.setOffline(true);
   await page.reload();
   await page.getByTestId("start-styrka-1").waitFor();
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("step-view").waitFor();
   assert((await page.getByTestId("exercise").innerText()) === "Knäböj", "offline prefix session");
   await context.close();
@@ -192,7 +212,7 @@ async function runShellPaths(browser) {
 async function runHappy(browser) {
   const { context, page } = await newPage(browser, { audio: true });
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("step-view").waitFor();
   assert((await page.locator("h1").innerText()) === "Styrka 1 – Press och knäböj", "session title in the header");
   assert((await page.getByTestId("exercise").innerText()) === "Knäböj", "first step should be the warmup squat");
@@ -271,7 +291,7 @@ async function runHappy(browser) {
 async function runMobility(browser) {
   const { context, page } = await newPage(browser);
   await page.goto(base);
-  await page.getByTestId("start-kondition").click();
+  await startSessionFromHome(page, "kondition");
   await page.getByTestId("duration-clock").waitFor();
   await page.screenshot({ path: `${shots}/mobility-timer.png` });
   const before = await page.getByTestId("exercise").innerText();
@@ -292,7 +312,7 @@ async function runOffline(browser) {
     await navigator.serviceWorker.ready;
   });
   await context.setOffline(true);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("klar").click();
   await page.getByTestId("confirm").click();
   await page.getByTestId("sync-status").waitFor();
@@ -308,7 +328,7 @@ async function runOffline(browser) {
 async function runPersistAndFragment(browser) {
   const { context, page } = await newPage(browser);
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("klar").click();
   await page.evaluate(() => {
     globalThis.__ATLAS_FORCE_PERSIST_FAIL = true;
@@ -349,7 +369,7 @@ async function runGithubGuard(browser) {
     await route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ message: "bad" }) });
   });
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("klar").click();
   await page.getByTestId("confirm").click();
   await page.getByTestId("nav-settings").click();
@@ -374,8 +394,10 @@ async function runCursorGuards(browser) {
   const { context, page } = await newPage(browser);
   await page.goto(base);
   await page.getByTestId("start-styrka-1").waitFor();
+  await page.getByTestId("start-styrka-1").click();
+  await page.getByTestId("preview-view").waitFor();
   await page.evaluate(() => {
-    const button = document.querySelector("[data-testid=start-styrka-1]");
+    const button = document.querySelector("[data-testid=confirm-start]");
     button.click();
     button.click();
   });
@@ -434,7 +456,7 @@ async function runWakeFallback(browser) {
   });
   const page = await context.newPage();
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByText("Skärmlås stöds inte").waitFor();
   await page.getByTestId("audio-note").waitFor();
   await page.getByTestId("step-view").waitFor();
@@ -475,7 +497,7 @@ async function runAckPersistFailure(browser) {
     });
   });
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("klar").click();
   await page.getByTestId("confirm").click();
   await page.getByText("Väntar på server: 1").waitFor();
@@ -517,7 +539,7 @@ async function runAckPersistFailure(browser) {
 async function runEndMarker(browser) {
   const { context, page } = await newPage(browser);
   await page.goto(base);
-  await page.getByTestId("start-styrka-1").click();
+  await startSessionFromHome(page, "styrka-1");
   await page.getByTestId("skip").click();
   await page.getByTestId("skip").click();
   await page.evaluate(() => {
@@ -542,7 +564,7 @@ async function runEndMarker(browser) {
   assert(marker.outcome === "completed_with_skips");
   assert(marker.setEventIds.length === 0);
   assert(marker.skippedStepIds.length === 3);
-  await page.getByTestId("start-styrka-2").click();
+  await startSessionFromHome(page, "styrka-2");
   await page.getByTestId("abandon").click();
   const afterAbandon = await page.evaluate(async () => (await idbMarkers()).length);
   assert(afterAbandon === 1, "abandon adds no marker");
@@ -585,5 +607,50 @@ async function runFetchPlanFeedback(browser) {
   const err = await page.getByTestId("settings-error").innerText();
   assert(err.includes("404"), "error should include status: " + err);
   assert(err.includes("Owner/Repo") || err.includes("arkivet"), "error should be actionable: " + err);
+  await context.close();
+}
+
+async function runPreviewAndEarlyEnd(browser) {
+  const { context, page } = await newPage(browser);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(base);
+  await page.getByTestId("start-styrka-3").click();
+  await page.getByTestId("preview-view").waitFor();
+  assert((await sessionCount(page)) === 0, "preview must not create a session");
+  assert((await page.getByTestId("time-full").innerText()).includes("ca"), "full duration");
+  assert((await page.getByTestId("time-quick").innerText()).includes("ca"), "quick duration");
+  const body = await page.locator("body").innerText();
+  assert(body.includes("Sittande vadpress"), "preview lists calf work");
+  assert(body.includes("Uppvärmning") || body.includes("Arbetsset"), "preview lists phases");
+  assert((await page.getByTestId("confirm-start").innerText()) === "Start", "start button visible");
+  assert((await page.getByTestId("preview-back").innerText()) === "Tillbaka", "back button visible");
+  await page.screenshot({ path: `${shots}/preview.png` });
+  await page.getByTestId("mode-quick").click();
+  await page.getByTestId("preview-omitted").waitFor();
+  const omitted = await page.getByTestId("preview-omitted").innerText();
+  assert(omitted.includes("Hantelflyes") || omitted.includes("Farmarbärning"), "quick mode lists omitted work");
+  assert((await sessionCount(page)) === 0, "mode toggle must not create a session");
+  await page.getByTestId("preview-back").click();
+  await page.getByTestId("start-styrka-3").waitFor();
+  assert((await sessionCount(page)) === 0, "back from preview leaves no session");
+
+  await page.getByTestId("start-styrka-3").click();
+  await page.getByTestId("mode-quick").click();
+  await page.getByTestId("confirm-start").click();
+  await page.getByTestId("step-view").waitFor();
+  assert((await sessionCount(page)) === 1, "start from preview creates one session");
+  await page.getByTestId("end-early").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${shots}/end-early.png` });
+  await page.getByTestId("end-early").click();
+  await page.getByTestId("end-early-dialog").waitFor();
+  await page.getByTestId("confirm-end-early").click();
+  await page.getByTestId("done-view").waitFor();
+  const marker = await page.evaluate(async () => (await idbMarkers())[0]);
+  assert(marker, "early end writes completed marker");
+  assert(marker.endedEarly === true, "endedEarly");
+  assert(marker.endReason === "time_pressure", "endReason");
+  assert(Array.isArray(marker.unperformedStepIds) && marker.unperformedStepIds.length > 0, "unperformed steps");
+  assert(marker.mode === "quick", "quick mode recorded");
+  assert(Array.isArray(marker.omittedExercises), "omitted exercises recorded");
   await context.close();
 }

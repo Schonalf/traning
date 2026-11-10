@@ -208,6 +208,11 @@ const TRANSPORT_KEYS = [
   "outcome",
   "setEventIds",
   "skippedStepIds",
+  "endedEarly",
+  "endReason",
+  "unperformedStepIds",
+  "mode",
+  "omittedExercises",
 ];
 
 /** Immutable body. Local retry fields never travel or affect equality. */

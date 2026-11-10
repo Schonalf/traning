@@ -23,6 +23,7 @@ import {
 } from "../public/lib/github.mjs";
 import { elapsedSeconds, startRest, tickRest } from "../public/lib/rest.mjs";
 import { decodePlanFragment, MAX_FRAGMENT_CHARS, normalizeSteps, prescribedWeight, validatePlan } from "../public/lib/schema.mjs";
+import { endSessionEarly, estimateSessionSeconds, formatEstimatedDuration, groupSteps, selectSessionSteps, sessionEstimates, stepPriority, unperformedStepIds } from "../public/lib/session-plan.mjs";
 import { applySyncResults, flushOutbox, prepareManualRetry, readyToUpload } from "../public/lib/sync.mjs";
 
 const TARGET = { owner: "demo-owner", repo: "training-data", branch: "main" };
@@ -706,4 +707,115 @@ test("service-worker cache namespaces are isolated by registration scope", async
   const cacheAt = (scope) => vm.runInNewContext(worker + "\nCACHE;", { self: { registration: { scope }, addEventListener() {} } });
   assert.notEqual(cacheAt("https://example.test/"), cacheAt("https://example.test/traning/"));
   assert.notEqual(cacheAt("https://example.test/traning/"), cacheAt("https://example.test/other/"));
+});
+
+test("plans without priority validate and default to 2", () => {
+  const plan = demoPlan();
+  for (const session of plan.sessions) {
+    for (const step of session.steps) delete step.priority;
+  }
+  const result = validatePlan(plan);
+  assert.equal(result.ok, true);
+  for (const step of result.plan.sessions.flatMap((session) => session.steps)) {
+    assert.equal(step.priority, 2);
+    assert.equal(stepPriority({}), 2);
+  }
+  const quick = selectSessionSteps(result.plan.sessions[0], "quick");
+  assert.equal(quick.steps.length, 0);
+  assert.ok(quick.omittedExercises.length > 0);
+});
+
+test("priority is accepted backward-compatibly and rejected when out of range", () => {
+  const plan = demoPlan();
+  plan.sessions[0].steps[0].priority = 1;
+  plan.sessions[0].steps[1].priority = 3;
+  assert.equal(validatePlan(plan).ok, true);
+  plan.sessions[0].steps[1].priority = 4;
+  assert.equal(validatePlan(plan).ok, false);
+  plan.sessions[0].steps[1].priority = 0;
+  assert.equal(validatePlan(plan).ok, false);
+  plan.sessions[0].steps[1].priority = 1.5;
+  assert.equal(validatePlan(plan).ok, false);
+});
+
+test("quick session keeps prio 1 warmups and plan order, and omits the rest", () => {
+  const catalog = {
+    id: "s3",
+    title: "S3",
+    steps: [
+      { id: "press-wu", exercise: "Lutande hantelpress", phase: "warmup", priority: 1, reps: { target: 8 }, restSeconds: 60 },
+      { id: "press-1", exercise: "Lutande hantelpress", phase: "work", priority: 1, reps: { target: 10 }, restSeconds: 180 },
+      { id: "dips-1", exercise: "Dips", phase: "work", priority: 2, reps: { target: 8 }, restSeconds: 120 },
+      { id: "calf-wu-l", exercise: "Sittande vadpress – vänster", phase: "warmup", priority: 1, reps: { target: 5 }, restSeconds: 30 },
+      { id: "calf-wu-r", exercise: "Sittande vadpress – höger", phase: "warmup", priority: 1, reps: { target: 5 }, restSeconds: 30 },
+      { id: "calf-1", exercise: "Sittande vadpress, ett ben – vänster", phase: "work", priority: 1, reps: { target: 12 }, restSeconds: 15 },
+      { id: "flyes-1", exercise: "Lutande hantelflyes", phase: "work", priority: 3, reps: { target: 10 }, restSeconds: 90 },
+      { id: "wrist-1", exercise: "Handledscurl, handflata upp", phase: "work", priority: 1, reps: { target: 8 }, restSeconds: 75 },
+    ],
+  };
+  const missing = { id: "no-prio", exercise: "Benpress", phase: "work", reps: { target: 10 }, restSeconds: 150 };
+  catalog.steps.splice(3, 0, missing);
+  const full = selectSessionSteps(catalog, "full");
+  assert.deepEqual(full.steps.map((step) => step.id), catalog.steps.map((step) => step.id));
+  const quick = selectSessionSteps(catalog, "quick");
+  assert.deepEqual(
+    quick.steps.map((step) => step.id),
+    ["press-wu", "press-1", "calf-wu-l", "calf-wu-r", "calf-1", "wrist-1"]
+  );
+  assert.ok(quick.steps.some((step) => step.phase === "warmup"));
+  assert.deepEqual(quick.omittedExercises, ["Dips", "Benpress", "Lutande hantelflyes"]);
+  const keys = groupSteps(catalog.steps).map((group) => group.key);
+  assert.ok(keys.includes("Sittande vadpress"));
+  assert.equal(groupSteps(catalog.steps).find((group) => group.key === "Sittande vadpress").priority, 1);
+  const estimates = sessionEstimates(catalog);
+  assert.ok(estimates.fullSeconds > estimates.quickSeconds);
+  assert.match(estimates.fullLabel, /^ca \d+ min$/);
+  assert.match(formatEstimatedDuration(estimateSessionSeconds(quick.steps)), /^ca \d+ min$/);
+});
+
+test("early-end payload marks time pressure and leaves the completed.json path unchanged", () => {
+  const session = {
+    id: SID,
+    title: "Styrka 3",
+    catalogId: "S3",
+    planId: "plan",
+    sessionType: "strength",
+    planDemo: false,
+    mode: "quick",
+    omittedExercises: ["Dips", "Bondgång"],
+    skipped: ["press-wu"],
+    stepIndex: 1,
+    phase: "step",
+    planSnapshot: { steps: [{ id: "press-wu" }, { id: "press-1" }, { id: "calf-1" }, { id: "wrist-1" }] },
+  };
+  const finished = endSessionEarly(session, "2026-11-10T08:00:00.000Z");
+  assert.equal(session.phase, "step");
+  assert.equal(finished.phase, "done");
+  assert.equal(finished.endedEarly, true);
+  assert.equal(finished.endReason, "time_pressure");
+  assert.deepEqual(finished.unperformedStepIds, ["press-1", "calf-1", "wrist-1"]);
+  const set = event({ eventId: "33333333-3333-4333-8333-333333333333", type: "completion", stepId: "press-wu" });
+  const marker = sessionCompletedEvent({ session: finished, events: [set], nowIso: finished.completedAt, eventId: EID });
+  assert.equal(marker.endedEarly, true);
+  assert.equal(marker.endReason, "time_pressure");
+  assert.deepEqual(marker.unperformedStepIds, ["press-1", "calf-1", "wrist-1"]);
+  assert.equal(marker.mode, "quick");
+  assert.deepEqual(marker.omittedExercises, ["Dips", "Bondgång"]);
+  assert.equal(marker.outcome, "completed_with_skips");
+  assert.equal(contentPath(marker), `sessions/${SID}/completed.json`);
+  const clean = transportPayload({ ...marker, token: "gho_secret", attempts: 4, status: "pending" });
+  assert.equal(clean.endedEarly, true);
+  assert.equal(clean.mode, "quick");
+  assert.equal(clean.token, undefined);
+  assert.equal(clean.attempts, undefined);
+  const duringRest = unperformedStepIds({ ...session, phase: "rest", stepIndex: 1 });
+  assert.deepEqual(duringRest, ["calf-1", "wrist-1"]);
+  const normal = sessionCompletedEvent({
+    session: { id: SID, skipped: [], title: "S1" },
+    events: [set],
+    nowIso: "2026-11-10T08:00:00.000Z",
+    eventId: EID,
+  });
+  assert.equal("endedEarly" in normal, false);
+  assert.equal("mode" in normal, false);
 });

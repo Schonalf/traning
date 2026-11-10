@@ -16,6 +16,7 @@ export function demoPlan() {
         steps: [
           step({
             id: "s1-wu-squat",
+            priority: 1,
             phase: "warmup",
             exercise: "Knäböj",
             equipment: "barbell",
@@ -28,6 +29,7 @@ export function demoPlan() {
           }),
           step({
             id: "s1-work-squat",
+            priority: 1,
             phase: "work",
             exercise: "Knäböj",
             equipment: "barbell",
@@ -41,6 +43,7 @@ export function demoPlan() {
           }),
           step({
             id: "s1-work-press",
+            priority: 1,
             phase: "work",
             exercise: "Bänkpress",
             equipment: "barbell",
@@ -62,6 +65,7 @@ export function demoPlan() {
         steps: [
           step({
             id: "s2-wu-rdl",
+            priority: 1,
             phase: "warmup",
             exercise: "Rumänsk marklyft",
             equipment: "barbell",
@@ -73,6 +77,7 @@ export function demoPlan() {
           }),
           step({
             id: "s2-work-rdl",
+            priority: 1,
             phase: "work",
             exercise: "Rumänsk marklyft",
             equipment: "barbell",
@@ -85,6 +90,7 @@ export function demoPlan() {
           }),
           step({
             id: "s2-lat",
+            priority: 2,
             phase: "work",
             exercise: "Latsdrag",
             equipment: "lat",
@@ -97,6 +103,7 @@ export function demoPlan() {
           }),
           step({
             id: "s2-row",
+            priority: 2,
             phase: "work",
             exercise: "Hantelrodd",
             equipment: "dumbbell",
@@ -117,6 +124,7 @@ export function demoPlan() {
         steps: [
           step({
             id: "s3-wu-press",
+            priority: 1,
             phase: "warmup",
             exercise: "Hantelpress uppvärmning",
             equipment: "dumbbell",
@@ -129,6 +137,7 @@ export function demoPlan() {
           }),
           step({
             id: "s3-ss-press",
+            priority: 1,
             phase: "work",
             exercise: "Hantelpress",
             equipment: "dumbbell",
@@ -144,6 +153,7 @@ export function demoPlan() {
           }),
           step({
             id: "s3-ss-fly",
+            priority: 3,
             phase: "work",
             exercise: "Hantelflyes",
             equipment: "dumbbell",
@@ -158,6 +168,7 @@ export function demoPlan() {
           }),
           step({
             id: "s3-carry",
+            priority: 3,
             phase: "work",
             exercise: "Farmarbärning",
             equipment: "dumbbell",
@@ -170,6 +181,7 @@ export function demoPlan() {
           }),
           step({
             id: "s3-seated-calf",
+            priority: 1,
             phase: "work",
             exercise: "Sittande vadpress",
             equipment: "machine",
@@ -182,6 +194,7 @@ export function demoPlan() {
           }),
           step({
             id: "s3-stand-calf",
+            priority: 1,
             phase: "work",
             exercise: "Stående vadlyft hemma",
             equipment: "dumbbell",
@@ -202,6 +215,7 @@ export function demoPlan() {
         steps: [
           step({
             id: "k-wu-mob",
+            priority: 3,
             phase: "warmup",
             exercise: "Rörlighet höft och bröstkorg",
             equipment: "bodyweight",
@@ -213,6 +227,7 @@ export function demoPlan() {
           }),
           step({
             id: "k-interval",
+            priority: 1,
             phase: "cardio",
             exercise: "Intervallarbete",
             equipment: "bodyweight",
@@ -224,6 +239,7 @@ export function demoPlan() {
           }),
           step({
             id: "k-recovery",
+            priority: 1,
             phase: "recovery",
             exercise: "Aktiv återhämtning",
             equipment: "bodyweight",
@@ -235,6 +251,7 @@ export function demoPlan() {
           }),
           step({
             id: "k-mobility",
+            priority: 3,
             phase: "mobility",
             exercise: "Nedvarvning rörlighet",
             equipment: "bodyweight",
