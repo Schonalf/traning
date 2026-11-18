@@ -6,6 +6,7 @@ import { fetchCompletedMarkers, formatPlanFetchError, formatPlanFetchOk, getCont
 import { progressionForSession, rirApplies } from "./lib/progression.mjs";
 import { localHistory, markerToHistory, mergeHistory, orderedSessions, shortDate, suggestNext } from "./lib/rotation.mjs";
 import { elapsedSeconds, formatClock, startRest, tickRest } from "./lib/rest.mjs";
+import { DEFAULT_SIGNAL, MUSIC_LABELS, VIBRATE, VOLUME_LABELS, VOLUME_LEVELS, alarmSamples, alarmSeconds, encodeWav, goSamples, normalizeSignal, preBeepFor, preBeepSamples, workEndIsFresh } from "./lib/signal.mjs";
 import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
 import {
   PRIORITY_LABELS,
@@ -40,6 +41,8 @@ const state = {
   settingsOk: "",
   saving: false,
   audio: null,
+  signal: { ...DEFAULT_SIGNAL },
+  signalOk: "",
   wake: null,
   wakeNote: "",
   fragmentNote: "",
@@ -48,7 +51,7 @@ const state = {
   remoteStatus: "idle",
 };
 
-const APP_VERSION = "2026-11-18-nasta-pass-nedrakning-rir-tid";
+const APP_VERSION = "2026-11-18-tydlig-signal-pausar-musik";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -157,6 +160,8 @@ async function loadAll() {
     state.tokenSaved = true;
   }
   if (targetRow?.value) state.target = { ...state.target, ...targetRow.value };
+  const signalRow = (settings || []).find((item) => item.id === "signal");
+  state.signal = normalizeSignal(signalRow?.value);
   const remoteRow = (settings || []).find((item) => item.id === "remoteHistory");
   if (remoteRow?.value?.markers && remoteRow.value.targetKey === targetKey()) state.remote = remoteRow.value;
   state.active = state.sessions.find((item) => item.phase === "step" || item.phase === "rest") || null;
@@ -243,45 +248,191 @@ function equipmentLabel(equipment) {
   return { barbell: "Skivstång", dumbbell: "Hantel", lat: "Latsdrag", machine: "Maskin", bodyweight: "Kroppsvikt", other: "Annan" }[equipment] || equipment;
 }
 
-function unlockAudio() {
-  const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
-  if (!AC) {
-    state.audioNote = "Ljud stöds inte. Håll koll på vilan själv. Passet fortsätter.";
-    return;
+/*
+ * Signals. Sounds are played through <audio> elements (see lib/signal.mjs for
+ * why): on Android Chrome/Brave that takes audio focus, so the alarm pauses
+ * (or ducks) Spotify instead of being mixed quietly underneath it. Web Audio
+ * is only a fallback when an <audio> element cannot play.
+ */
+const sounds = { urls: {}, players: {}, primed: false };
+const ALARM_AUDIBLE_SECONDS = 3.9;
+
+function soundKey(kind) {
+  return kind === "alarm" ? `alarm-${state.signal.music}` : kind;
+}
+
+function soundUrl(kind) {
+  const key = soundKey(kind);
+  if (!sounds.urls[key]) {
+    const samples = kind === "alarm" ? alarmSamples(alarmSeconds(state.signal.music)) : kind === "go" ? goSamples() : preBeepSamples();
+    sounds.urls[key] = URL.createObjectURL(new Blob([encodeWav(samples)], { type: "audio/wav" }));
   }
+  return sounds.urls[key];
+}
+
+function player(kind) {
+  if (typeof globalThis.Audio !== "function" || typeof URL.createObjectURL !== "function") return null;
+  let node = sounds.players[kind];
+  if (!node) {
+    node = new Audio();
+    node.preload = "auto";
+    sounds.players[kind] = node;
+  }
+  const key = soundKey(kind);
+  if (node.dataset.sound !== key) {
+    node.src = soundUrl(kind);
+    node.dataset.sound = key;
+  }
+  return node;
+}
+
+function unlockAudio() {
+  if (!sounds.primed) {
+    sounds.primed = true;
+    for (const kind of ["alarm", "tick", "go"]) {
+      try {
+        player(kind)?.load();
+      } catch {
+        /* fallback below */
+      }
+    }
+    // Prime playback inside the user gesture with a muted short clip only, so
+    // starting a pass never takes audio focus from the music.
+    const tick = player("tick");
+    if (tick) {
+      tick.muted = true;
+      const pending = tick.play?.();
+      if (pending && typeof pending.then === "function") {
+        pending.then(() => { tick.pause(); tick.currentTime = 0; tick.muted = false; state.audioNote = ""; }).catch(() => {
+          tick.muted = false;
+          sounds.primed = false;
+          showAudioNote("Webbläsaren blockerar ljud. Passet fortsätter. Tryck på skärmen, eller Testa signal i Inställningar.");
+        });
+      } else {
+        tick.muted = false;
+      }
+    }
+  }
+  const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!AC) return;
   try {
     if (!state.audio) state.audio = new AC();
-    const pending = state.audio.resume?.();
-    if (pending && typeof pending.catch === "function") {
-      pending.catch(() => {
-        state.audioNote = "Ljud är blockerat. Passet fortsätter. Testa ljud efter en tryckning.";
-      });
-    }
+    state.audio.resume?.()?.catch?.(() => {});
   } catch {
-    state.audioNote = "Ljud kunde inte startas. Passet fortsätter utan pip.";
+    /* Web Audio is only the fallback */
   }
 }
 
-function beep(frequency = 880, seconds = 0.12) {
+function showAudioNote(message) {
+  state.audioNote = message;
+  const note = document.querySelector("[data-testid=audio-note]");
+  if (note) note.textContent = message;
+  else document.querySelector("[data-testid=step-view]")?.append(text("p", message, { class: "warn", "data-testid": "audio-note" }));
+}
+
+function webAudioBeep(frequency = 1046, seconds = 0.4) {
   if (!state.audio) return;
   try {
+    state.audio.resume?.()?.catch?.(() => {});
     const osc = state.audio.createOscillator();
     const gain = state.audio.createGain();
+    osc.type = "square";
     osc.frequency.value = frequency;
     gain.gain.setValueAtTime(0.0001, state.audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.2, state.audio.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.6, state.audio.currentTime + 0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001, state.audio.currentTime + seconds);
     osc.connect(gain);
     gain.connect(state.audio.destination);
     osc.start();
     osc.stop(state.audio.currentTime + seconds + 0.01);
   } catch {
-    state.audioNote = "Pipet kunde inte spelas. Passet fortsätter.";
+    /* nothing more to try */
   }
 }
 
-function buzz(ms = 80) {
-  if (typeof navigator.vibrate === "function") navigator.vibrate(ms);
+function alarmAudible() {
+  const node = sounds.players.alarm;
+  return Boolean(node && !node.paused && node.currentTime < ALARM_AUDIBLE_SECONDS);
+}
+
+function setAlarmMetadata(title) {
+  try {
+    if (globalThis.MediaMetadata && navigator.mediaSession) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title, artist: "Atlas träning" });
+    }
+  } catch {
+    /* optional */
+  }
+}
+
+/** kind: "alarm" | "tick" | "go". Resolves true when the <audio> path played. */
+function playSound(kind, title = "") {
+  if (!state.signal.enabled) return Promise.resolve(false);
+  const node = player(kind);
+  const fallback = () => {
+    if (kind === "alarm") {
+      webAudioBeep(1400, 0.4);
+      setTimeout(() => webAudioBeep(1900, 0.4), 500);
+      setTimeout(() => webAudioBeep(1400, 0.4), 1000);
+    } else {
+      webAudioBeep(kind === "go" ? 1800 : 1200, kind === "go" ? 0.4 : 0.12);
+    }
+  };
+  if (!node) {
+    fallback();
+    return Promise.resolve(false);
+  }
+  try {
+    node.muted = false;
+    node.volume = VOLUME_LEVELS[state.signal.volume] ?? 1;
+    node.currentTime = 0;
+    if (kind === "alarm") setAlarmMetadata(title || "Tiden är slut");
+    const pending = node.play();
+    if (!pending || typeof pending.then !== "function") return Promise.resolve(true);
+    return pending.then(() => true).catch(() => {
+      showAudioNote("Webbläsaren stoppade larmljudet. Tryck på skärmen en gång, eller Testa signal i Inställningar.");
+      fallback();
+      return false;
+    });
+  } catch {
+    fallback();
+    return Promise.resolve(false);
+  }
+}
+
+function vibrate(pattern) {
+  try {
+    if (typeof navigator.vibrate === "function") navigator.vibrate(pattern);
+  } catch {
+    /* unsupported */
+  }
+}
+
+/** The ring: loud alarm through the media path plus a long vibration. */
+function ringAlarm(title) {
+  globalThis.__signalLog?.push({ kind: "alarm", title, at: Date.now() });
+  vibrate(VIBRATE.alarm);
+  return playSound("alarm", title);
+}
+
+function stopAlarm() {
+  const node = sounds.players.alarm;
+  if (node && !node.paused) {
+    node.pause();
+    try {
+      node.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
+    vibrate(0);
+  }
+}
+
+function tickSignal(kind) {
+  globalThis.__signalLog?.push({ kind, at: Date.now() });
+  if (kind === "tick" && alarmAudible()) return;
+  vibrate(kind === "go" ? VIBRATE.go : VIBRATE.tick);
+  playSound(kind);
 }
 
 async function requestWake() {
@@ -350,6 +501,12 @@ async function boot() {
   if (state.active?.phase === "step" && !state.active.stepStartedAt) {
     state.active.stepStartedAt = Date.now();
   }
+  // Any tap silences a ringing alarm (Klar included) and keeps audio unlocked,
+  // also after a reload in the middle of a pass.
+  document.addEventListener("pointerdown", () => {
+    stopAlarm();
+    unlockAudio();
+  }, { capture: true });
   if ("serviceWorker" in navigator) {
     const scopeUrl = new URL("./", import.meta.url);
     navigator.serviceWorker.register(new URL("sw.js", scopeUrl), { scope: scopeUrl.href }).catch(() => {});
@@ -762,10 +919,12 @@ function renderSession() {
   );
   card.append(text("p", state.wakeNote || "Om skärmlåset saknas: håll skärmen tänd manuellt.", { class: state.wakeNote ? "warn" : "muted", "data-testid": "wake-note" }));
   if (state.audioNote) card.append(text("p", state.audioNote, { class: "warn", "data-testid": "audio-note" }));
-  card.append(text("p", "Låst skärm: ett pip efter vilan är inte garanterat.", { class: "muted" }));
+  card.append(text("p", SIGNAL_HINT, { class: "muted", "data-testid": "signal-hint" }));
   app.append(card);
   if (step.durationSeconds != null) armDuration();
 }
+
+const SIGNAL_HINT = "Larmet ringer när tiden är slut och pausar musiken. Ha appen öppen med skärmen tänd; med låst skärm eller appen i bakgrunden kan det komma sent eller utebli.";
 
 let durationTimer = 0;
 let countdownShown = 0;
@@ -780,12 +939,10 @@ function armDuration() {
     if (left !== countdownShown) {
       const previous = countdownShown;
       countdownShown = left;
-      if (left > 0) {
-        beep(660, 0.08);
-        buzz(60);
-      } else if (previous > 0) {
-        beep(1046, 0.35);
-        buzz(250);
+      if (left > 0 && preBeepFor(left) && previous > left) {
+        tickSignal("tick");
+      } else if (left === 0 && previous > 0) {
+        tickSignal("go");
       }
     }
     node.dataset.countdown = String(left);
@@ -832,9 +989,10 @@ function onWorkTimerZero(session, step) {
   const key = timerEndKey(session);
   if (endSignaledFor === key) return;
   endSignaledFor = key;
-  beep(1046, 0.5);
-  buzz(400);
   const kind = timerKind(step);
+  if (workEndIsFresh(workSecondsLeft(session, step, Date.now()))) {
+    ringAlarm(kind === "auto" ? "Tiden är slut – går vidare" : kind === "stop" ? "Tiden är slut – tryck Klar" : "Tiden är nådd");
+  }
   const label = document.querySelector("[data-testid=countdown-label]");
   if (kind === "auto") {
     if (label) label.textContent = "Tiden är slut – går vidare";
@@ -1137,7 +1295,7 @@ function renderRest() {
     nextStep.durationSeconds != null ? text("p", `Tid: ${nextStep.durationSeconds} s`) : null,
     nextStep.alternative ? text("p", `Alternativ: ${nextStep.alternative}`, { class: "muted", "data-testid": "step-alternative" }) : null,
     clock,
-    text("p", "Låst skärm: pipet är inte garanterat.", { class: "muted" }),
+    text("p", SIGNAL_HINT, { class: "muted", "data-testid": "signal-hint" }),
     el("button", { class: "ghost end-early", type: "button", "data-testid": "end-early", onclick: openEndEarlyDialog }, ["Avsluta passet nu (tidsnöd)"]),
   ]);
   app.append(card);
@@ -1155,10 +1313,7 @@ function renderRest() {
       const candidate = { ...state.active, rest: decision.state };
       try {
         await saveSession(candidate);
-        if (decision.beep) {
-          beep();
-          buzz();
-        }
+        if (decision.beep) ringAlarm("Vilan är slut");
       } catch {
         state.persistError = "Kunde inte spara vilan. Timern stannar tills lagringen fungerar.";
         showPersistBanner();
@@ -1169,10 +1324,7 @@ function renderRest() {
       const candidate = advancedAfterRest(state.active, decision.state, Date.now());
       try {
         await saveSession(candidate);
-        if (decision.beep) {
-          beep();
-          buzz();
-        }
+        if (decision.beep) ringAlarm("Vilan är slut");
         clearInterval(restTimer);
       } catch {
         state.persistError = "Kunde inte gå vidare efter vilan. Steget är oförändrat.";
@@ -1263,6 +1415,7 @@ function renderSettings() {
   const persist = el("input", { "data-testid": "persist-token", type: "checkbox" });
   persist.checked = state.tokenSaved;
   app.append(
+    renderSignalSettings(),
     el("section", { class: "card stack", "data-testid": "settings" }, [
       text("h2", "Privat datarepo"),
       text("p", "Token skrivs bara här, av dig. Den läggs aldrig i adressen, exporten eller cachen. Standard är minnet. Att spara den lokalt ökar risken vid XSS.", { class: "muted" }),
@@ -1279,9 +1432,45 @@ function renderSettings() {
       el("button", { class: "ghost", type: "button", "data-testid": "fetch-plan", onclick: fetchPlan }, ["Hämta plan"]),
       el("button", { class: "ghost", type: "button", "data-testid": "sync-now", onclick: () => flush({ manual: true }) }, ["Synka kö"]),
       el("button", { class: "ghost", type: "button", "data-testid": "export", onclick: exportBackup }, ["Exportera JSON"]),
-      el("button", { class: "ghost", type: "button", "data-testid": "sound", onclick: () => { unlockAudio(); beep(); } }, ["Testa ljud"]),
     ])
   );
+}
+
+function renderSignalSettings() {
+  const enabled = el("input", { "data-testid": "signal-enabled", type: "checkbox" });
+  enabled.checked = state.signal.enabled;
+  const volume = el("select", { "data-testid": "signal-volume" }, Object.entries(VOLUME_LABELS).map(([value, label]) => el("option", { value }, [label])));
+  volume.value = state.signal.volume;
+  const music = el("select", { "data-testid": "signal-music" }, Object.entries(MUSIC_LABELS).map(([value, label]) => el("option", { value }, [label])));
+  music.value = state.signal.music;
+  const save = () => saveSignal({ enabled: enabled.checked, volume: volume.value, music: music.value });
+  enabled.addEventListener("change", save);
+  volume.addEventListener("change", save);
+  music.addEventListener("change", save);
+  return el("section", { class: "card stack", "data-testid": "signal-settings" }, [
+    text("h2", "Signal när tiden är slut"),
+    text("p", "Larmet spelas som media, så Android pausar eller sänker musik från t.ex. Spotify medan det ringer. Telefonen vibrerar också. Tryck var som helst för att tysta. Volymen följer telefonens medievolym.", { class: "muted" }),
+    el("label", {}, [enabled, "Ljudsignal på"]),
+    el("label", {}, ["Volym", volume]),
+    el("label", {}, ["Musik vid larm", music]),
+    text("p", state.signal.music === "pause"
+      ? "Pausa: musiken stannar och startar oftast inte av sig själv. Tryck play i hörlurarna eller Spotify när du vill fortsätta."
+      : "Sänk: musiken går ner under larmet och kommer tillbaka av sig själv. Lättare att missa.", { class: "muted small", "data-testid": "signal-music-note" }),
+    el("button", { class: "ghost", type: "button", "data-testid": "test-signal", onclick: () => { unlockAudio(); ringAlarm("Testsignal"); } }, ["Testa signal"]),
+    state.signalOk ? text("p", state.signalOk, { class: "ok", "data-testid": "signal-ok" }) : null,
+  ]);
+}
+
+async function saveSignal(raw) {
+  state.signal = normalizeSignal(raw);
+  try {
+    await withDb(["settings"], "readwrite", async (stores) => stores.settings.put({ id: "signal", value: state.signal }));
+    state.signalOk = "Signalinställningen är sparad.";
+  } catch {
+    state.signalOk = "";
+    state.settingsError = "Signalinställningen kunde inte sparas lokalt. Den gäller tills appen stängs.";
+  }
+  render();
 }
 
 async function saveSettings(fields) {

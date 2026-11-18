@@ -18,4 +18,4 @@ The worker scope is the directory of `sw.js`. It caches only that shell. It does
 
 ## Limits
 
-Browser PAT storage is XSS-sensitive. Git history on a data repo keeps events. Screen-locked beeps are not guaranteed. The end file is only a marker. GitHub’s built-in routine listeners do not fire on a raw push, so this repo does not promise a native push listener. A future verified webhook or path-filtered Action would need a separate setup and user-managed secrets. A daily check would be a slower fallback. No such receiver is implemented.
+Browser PAT storage is XSS-sensitive. Git history on a data repo keeps events. Alarms behind a locked screen or in a hidden tab are not guaranteed (timers are throttled). The end file is only a marker. GitHub’s built-in routine listeners do not fire on a raw push, so this repo does not promise a native push listener. A future verified webhook or path-filtered Action would need a separate setup and user-managed secrets. A daily check would be a slower fallback. No such receiver is implemented.

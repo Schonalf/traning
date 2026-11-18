@@ -36,6 +36,8 @@ try {
     await runGithubGuard(browser);
     await runCursorGuards(browser);
     await runWakeFallback(browser);
+    await runSignalSettings(browser);
+    await runRealAlarmMedia(browser);
     await runAckPersistFailure(browser);
     await runEndMarker(browser);
     await runFetchPlanFeedback(browser);
@@ -102,6 +104,24 @@ async function newPage(browser, { audio = false } = {}) {
         }
       }
       globalThis.AudioContext = FakeAudio;
+      // Signals go through <audio> elements; count audible plays by kind.
+      globalThis.__sounds = [];
+      globalThis.__vibrations = [];
+      HTMLMediaElement.prototype.play = function play() {
+        if (!this.muted) {
+          globalThis.__beeps += 1;
+          globalThis.__sounds.push({ sound: this.dataset.sound || "", volume: this.volume });
+        }
+        Object.defineProperty(this, "paused", { configurable: true, value: false });
+        return Promise.resolve();
+      };
+      HTMLMediaElement.prototype.pause = function pause() {
+        Object.defineProperty(this, "paused", { configurable: true, value: true });
+      };
+      navigator.vibrate = (pattern) => {
+        globalThis.__vibrations.push(pattern);
+        return true;
+      };
     });
   }
   const page = await context.newPage();
@@ -238,6 +258,9 @@ async function runHappy(browser) {
   await page.screenshot({ path: `${shots}/rest-timer.png` });
   await page.getByText("måste anges").waitFor({ timeout: 12000 });
   assert((await page.evaluate(() => globalThis.__beeps)) === 1, "one beep");
+  const restSounds = await page.evaluate(() => globalThis.__sounds);
+  assert(restSounds.length === 1 && restSounds[0].sound === "alarm-pause" && restSounds[0].volume === 1, "rest end rings the pause alarm: " + JSON.stringify(restSounds));
+  assert((await page.evaluate(() => globalThis.__vibrations.some((p) => Array.isArray(p) && p.length > 5))), "alarm vibrates");
   await delay(400);
   assert((await page.evaluate(() => globalThis.__beeps)) === 1, "no second beep");
   await page.getByTestId("klar").click();
@@ -446,6 +469,58 @@ async function runCursorGuards(browser) {
   await context.close();
 }
 
+async function runSignalSettings(browser) {
+  const { context, page } = await newPage(browser, { audio: true });
+  await page.goto(base);
+  await page.getByTestId("nav-settings").click();
+  await page.getByTestId("signal-settings").waitFor();
+  await page.getByTestId("test-signal").click();
+  let sounds = await page.evaluate(() => globalThis.__sounds.map((item) => item.sound));
+  assert(sounds.includes("alarm-pause"), "Testa signal plays the alarm: " + sounds);
+  await page.getByTestId("signal-volume").selectOption("low");
+  await page.getByTestId("signal-music").selectOption("duck");
+  await page.getByTestId("signal-ok").waitFor();
+  await page.getByTestId("test-signal").click();
+  const last = await page.evaluate(() => globalThis.__sounds.at(-1));
+  assert(last.sound === "alarm-duck" && last.volume === 0.45, "duck alarm at low volume: " + JSON.stringify(last));
+  await page.screenshot({ path: `${shots}/signal-settings.png`, fullPage: true });
+  await page.reload();
+  await page.getByTestId("nav-settings").click();
+  assert((await page.getByTestId("signal-music").inputValue()) === "duck", "signal setting persists");
+  await page.getByTestId("signal-enabled").uncheck();
+  await page.getByTestId("signal-ok").waitFor();
+  const before = await page.evaluate(() => globalThis.__sounds.length);
+  await page.getByTestId("test-signal").click();
+  assert((await page.evaluate(() => globalThis.__sounds.length)) === before, "sound off plays nothing");
+  await context.close();
+}
+
+async function runRealAlarmMedia(browser) {
+  // No fakes: the generated alarm must load under the page CSP (media-src blob:)
+  // with the durations that pick Android audio focus (pause > 5 s, duck <= 5 s).
+  const { context, page } = await newPage(browser);
+  const cspErrors = [];
+  page.on("console", (msg) => { if (/media-src|URL safety|Refused to load media/i.test(msg.text())) cspErrors.push(msg.text()); });
+  await page.goto(base);
+  const result = await page.evaluate(async () => {
+    const m = await import("./lib/signal.mjs");
+    const out = {};
+    for (const mode of ["pause", "duck"]) {
+      const url = URL.createObjectURL(new Blob([m.encodeWav(m.alarmSamples(m.alarmSeconds(mode)))], { type: "audio/wav" }));
+      const audio = new Audio(url);
+      out[mode] = await new Promise((resolve) => {
+        audio.onloadedmetadata = () => resolve(audio.duration);
+        audio.onerror = () => resolve("error: " + (audio.error?.message || "?"));
+      });
+    }
+    return out;
+  });
+  assert(result.pause > 5 && result.pause < 7, "pause alarm loads, > 5 s: " + JSON.stringify(result));
+  assert(result.duck > 3 && result.duck <= 5, "duck alarm loads, <= 5 s: " + JSON.stringify(result));
+  assert(cspErrors.length === 0, "no CSP errors: " + cspErrors);
+  await context.close();
+}
+
 async function runWakeFallback(browser) {
   const context = await browser.newContext({ viewport: { width: 360, height: 780 } });
   await context.addInitScript(() => {
@@ -461,6 +536,7 @@ async function runWakeFallback(browser) {
       }
     }
     globalThis.AudioContext = Blocked;
+    HTMLMediaElement.prototype.play = () => Promise.reject(new DOMException("blocked", "NotAllowedError"));
   });
   const page = await context.newPage();
   await page.goto(base);
@@ -787,7 +863,9 @@ async function runCountdown(browser) {
   assert(work === "00:20" || work === "00:19", "work timer starts full after countdown: " + work);
   assert((await page.getByTestId("countdown-label").innerText()) === "Tiden går", "running label");
   const beeps = await page.evaluate(() => globalThis.__beeps);
-  assert(beeps >= 5, "beep per countdown second and at start: " + beeps);
+  assert(beeps >= 4, "pre-beeps at 3-2-1 and a start tone: " + beeps);
+  const kinds = await page.evaluate(() => globalThis.__sounds.map((item) => item.sound));
+  assert(kinds.filter((k) => k === "tick").length >= 3 && kinds.includes("go"), "tick x3 + go through <audio>: " + kinds);
   await page.getByTestId("restart-countdown").click();
   await page.waitForFunction(() => ["4", "5"].includes(document.querySelector("[data-testid=duration-clock]")?.dataset.countdown), null, { timeout: 3000 });
   // Klar → next timed step also gets the countdown. Mobility/cardio has no RIR field.
@@ -910,6 +988,10 @@ async function runTimerEnd(browser) {
   assert((await page.getByTestId("timer-hint").getAttribute("data-kind")) === "overtime", "stretch keeps overtime");
   assert((await page.getByTestId("step-view").count()) === 1, "stretch stays until Klar");
   const beeps = await page.evaluate(() => globalThis.__beeps);
-  assert(beeps >= 4 * 6, "countdown + end beeps: " + beeps);
+  const kinds = await page.evaluate(() => globalThis.__sounds.map((item) => item.sound));
+  // Interval end, rest end, recovery end, calf end, stretch time reached.
+  assert(kinds.filter((k) => k.startsWith("alarm")).length >= 5, "one alarm per timer end: " + kinds);
+  assert(kinds.filter((k) => k === "go").length >= 4, "start tone per timed step: " + kinds);
+  assert(beeps >= 12, "countdown + end alarms: " + beeps);
   await context.close();
 }

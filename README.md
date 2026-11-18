@@ -95,3 +95,12 @@ Hosting this PWA publicly needs a separate approval. Nothing here is a go-live. 
 - `test/e2e.mjs` — phone viewport, mocked GitHub, root and prefix, screenshots
 
 Screenshots from the e2e run are written outside the repo to `/workspace/traning-screenshots/`.
+
+## Timer signals
+
+When a rest, interval or timed set ends the app rings a generated alarm (three bursts, ~4 s) through an `<audio>` element and vibrates. On Android Chrome/Brave an audible media element takes audio focus; Chromium picks the focus type from the clip length (`media/base/media_content_type.cc`, 5 s threshold):
+
+- **Pausa musiken** (default): 6 s clip → persistent focus → Spotify and similar apps pause. They usually do not resume by themselves.
+- **Sänk musiken en stund**: 4.5 s clip → transient "may duck" focus → music gets quieter and returns.
+
+The 5 s lead-in plays short ticks at 3-2-1 and a start tone (short clips, so music only ducks). Any tap silences a ringing alarm. Settings → *Signal när tiden är slut* has on/off, volume, music mode and **Testa signal**. The page CSP allows `media-src blob:` for the generated sounds. A web page cannot request audio focus directly, and timers in a hidden tab or behind a locked screen are throttled, so keep the app open with the screen on (the app holds a Screen Wake Lock during a pass).
