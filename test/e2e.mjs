@@ -40,6 +40,8 @@ try {
     await runEndMarker(browser);
     await runFetchPlanFeedback(browser);
     await runPreviewAndEarlyEnd(browser);
+    await runNextPass(browser);
+    await runCountdown(browser);
   } finally {
     await browser.close();
   }
@@ -296,7 +298,7 @@ async function runMobility(browser) {
   await page.getByTestId("duration-clock").waitFor();
   await page.screenshot({ path: `${shots}/mobility-timer.png` });
   const before = await page.getByTestId("exercise").innerText();
-  await page.waitForTimeout(21000);
+  await page.waitForTimeout(27000);
   const after = await page.getByTestId("exercise").innerText();
   assert(before === after, "duration did not auto-advance");
   assert((await page.getByTestId("duration-clock").innerText()).includes("Över tid"), "overrun stays on the step");
@@ -660,4 +662,141 @@ async function runPreviewAndEarlyEnd(browser) {
   assert(marker.mode === "base", "base mode recorded");
   assert(Array.isArray(marker.omittedExercises), "omitted exercises recorded");
   await context.close();
+}
+
+async function runNextPass(browser) {
+  const { context, page } = await newPage(browser);
+  await page.setViewportSize({ width: 360, height: 800 });
+  const sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const marker = {
+    eventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    sessionId: sid,
+    type: "session_completed",
+    schemaVersion: 1,
+    sessionTitle: "Styrka 3 – Bröstvolym och bärövningar",
+    catalogId: "styrka-3",
+    planId: "demo",
+    sessionType: "strength",
+    planDemo: true,
+    completedAt: "2026-11-10T11:42:35.922Z",
+    outcome: "completed",
+    setEventIds: ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+    skippedStepIds: [],
+  };
+  let github = "ok";
+  const methods = [];
+  await page.route("https://api.github.com/**", async (route) => {
+    const url = route.request().url();
+    methods.push(route.request().method());
+    if (github === "down") {
+      await route.abort();
+      return;
+    }
+    if (url.includes("/git/trees/")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ truncated: false, tree: [{ type: "blob", path: `sessions/${sid}/completed.json` }] }),
+      });
+      return;
+    }
+    if (url.includes(`/contents/sessions/${sid}/completed.json`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ content: Buffer.from(JSON.stringify(marker), "utf8").toString("base64"), sha: "m" }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+  await page.goto(base);
+  await page.getByTestId("next-hero").waitFor();
+  const warning = await page.getByTestId("next-warning").innerText();
+  assert(warning.includes("Kan inte räkna ut nästa pass"), "explicit warning without history: " + warning);
+  assert((await page.getByTestId("next-start").count()) === 0, "no start button without suggestion");
+  assert((await page.getByTestId("next-badge").count()) === 0, "no badge without suggestion");
+  await page.screenshot({ path: `${shots}/next-missing.png` });
+
+  await page.getByTestId("nav-settings").click();
+  await page.getByTestId("owner").fill("demo-owner");
+  await page.getByTestId("repo").fill("training-data");
+  await page.getByTestId("branch").fill("main");
+  await page.getByTestId("token").fill(token);
+  await page.getByTestId("save-settings").click();
+  await page.getByTestId("nav-settings").click();
+  await page.locator("[data-testid=next-hero][data-next=kondition]").waitFor({ timeout: 5000 });
+  const title = await page.getByTestId("next-title").innerText();
+  assert(title.includes("Kondition"), "hero shows next pass: " + title);
+  assert((await page.getByTestId("next-start").innerText()) === "Starta kondition", "primary start button");
+  assert((await page.getByTestId("next-last").innerText()).includes("Styrka 3"), "hero shows last pass");
+  const first = page.locator("button.session-btn").first();
+  assert((await first.getAttribute("data-testid")) === "start-kondition", "suggested pass sorted first");
+  assert((await page.getByTestId("next-badge").count()) === 1, "one Nästa badge");
+  assert((await page.getByTestId("start-kondition").innerText()).includes("Nästa"), "badge on suggested pass");
+  const box = await page.getByTestId("next-start").boundingBox();
+  assert(box && box.y + box.height <= 800, "start button above the fold on 360×800");
+  assert(!(await page.locator("body").innerText()).includes(token), "token never rendered");
+  await page.screenshot({ path: `${shots}/next-pass.png` });
+  assert(methods.every((m) => m === "GET"), "history read is GET only");
+
+  await page.getByTestId("start-styrka-1").click();
+  assert((await page.getByTestId("preview-not-next").innerText()).includes("kondition"), "preview warns when not next");
+  await page.getByTestId("preview-back").click();
+  await page.getByTestId("next-start").click();
+  await page.getByTestId("preview-is-next").waitFor();
+  assert((await sessionCount(page)) === 0, "hero opens preview, does not start");
+  await page.getByTestId("preview-back").click();
+
+  github = "down";
+  await page.reload();
+  await page.locator("[data-testid=next-hero][data-next=kondition]").waitFor();
+  await page.waitForFunction(() => document.querySelector("[data-testid=next-source]")?.className.includes("warn"), null, { timeout: 5000 }).catch(() => {});
+  const src = await page.getByTestId("next-source").innerText();
+  assert(src.length > 0, "source line present");
+  await context.close();
+}
+
+async function runCountdown(browser) {
+  const { context, page } = await newPage(browser, { audio: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.goto(base);
+  await startSessionFromHome(page, "kondition", "full");
+  await page.getByTestId("duration-clock").waitFor();
+  const clock = page.getByTestId("duration-clock");
+  const firstValue = await clock.innerText();
+  assert(/^[345]$/.test(firstValue), "timed step opens with 5 s countdown: " + firstValue);
+  assert((await page.getByTestId("countdown-label").innerText()).includes("Gör dig redo"), "countdown label");
+  await page.screenshot({ path: `${shots}/countdown.png` });
+  const seen = new Set();
+  const until = Date.now() + 7000;
+  while (Date.now() < until) {
+    const value = await clock.getAttribute("data-countdown");
+    seen.add(value);
+    if (value === "0") break;
+    await delay(80);
+  }
+  for (const n of ["4", "3", "2", "1", "0"]) assert(seen.has(n), `countdown shows ${n}: ${[...seen]}`);
+  await page.waitForFunction(() => /^\d\d:\d\d$/.test(document.querySelector("[data-testid=duration-clock]").textContent));
+  const work = await clock.innerText();
+  assert(work === "00:20" || work === "00:19", "work timer starts full after countdown: " + work);
+  assert((await page.getByTestId("countdown-label").innerText()) === "Tiden går", "running label");
+  const beeps = await page.evaluate(() => globalThis.__beeps);
+  assert(beeps >= 5, "beep per countdown second and at start: " + beeps);
+  await page.getByTestId("restart-countdown").click();
+  await page.waitForFunction(() => ["4", "5"].includes(document.querySelector("[data-testid=duration-clock]")?.dataset.countdown), null, { timeout: 3000 });
+  // Klar → next timed step also gets the countdown.
+  await page.getByTestId("klar").click();
+  await page.getByTestId("confirm").click();
+  await page.getByText("Intervallarbete").waitFor();
+  assert(/^[345]$/.test(await page.getByTestId("duration-clock").innerText()), "next timed step counts down too");
+  await context.close();
+
+  // Non-timed steps have no countdown.
+  const second = await newPage(browser);
+  await second.page.goto(base);
+  await startSessionFromHome(second.page, "styrka-1");
+  await second.page.getByTestId("step-view").waitFor();
+  assert((await second.page.getByTestId("countdown-label").count()) === 0, "no countdown on rep-based set");
+  await second.context.close();
 }

@@ -113,6 +113,22 @@ export function sessionCompletedEvent({ session, events, nowIso, eventId }) {
 
 }
 
+/** Lead-in before a timed work step (holds, intervals, mobility timers). */
+export const COUNTDOWN_MS = 5000;
+
+/** Start time for a step: timed steps start after a 5 s countdown, others at once. */
+export function stepStartTime(step, now) {
+  return step && step.durationSeconds != null ? now + COUNTDOWN_MS : now;
+}
+
+/** Whole seconds left of the lead-in countdown (5…1), or 0 when the work timer runs. */
+export function countdownLeft(session, step, now) {
+  if (!session || !step || step.durationSeconds == null || typeof session.stepStartedAt !== "number") return 0;
+  const ms = session.stepStartedAt - now;
+  if (ms <= 0) return 0;
+  return Math.min(Math.ceil(COUNTDOWN_MS / 1000), Math.ceil(ms / 1000));
+}
+
 export function skippedSession(session, now) {
   const step = session.planSnapshot.steps[session.stepIndex];
   const next = session.stepIndex + 1;
@@ -122,7 +138,7 @@ export function skippedSession(session, now) {
     skipped: [...(session.skipped || []), step.id],
     phase: done ? "done" : "step",
     stepIndex: done ? session.stepIndex : next,
-    stepStartedAt: done ? session.stepStartedAt : now,
+    stepStartedAt: done ? session.stepStartedAt : stepStartTime(session.planSnapshot.steps[next], now),
     rest: null,
   };
 }
@@ -133,7 +149,7 @@ export function advancedAfterRest(session, restState, now) {
     stepIndex: session.stepIndex + 1,
     phase: "step",
     rest: restState,
-    stepStartedAt: now,
+    stepStartedAt: stepStartTime(session.planSnapshot.steps[session.stepIndex + 1], now),
   };
 }
 

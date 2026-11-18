@@ -362,7 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
-  assert.match(sw, /CACHE_PREFIX\}v7/);
+  assert.match(sw, /CACHE_PREFIX\}v8/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -861,4 +861,159 @@ test("early-end payload marks time pressure and leaves the completed.json path u
   });
   assert.equal("endedEarly" in normal, false);
   assert.equal("mode" in normal, false);
+});
+
+// ---- Nästa pass (rotation) ----
+import { completedPathsFromTree, localHistory, markerToHistory, mergeHistory, orderedSessions, suggestNext } from "../public/lib/rotation.mjs";
+import { fetchCompletedMarkers, treeUrl } from "../public/lib/github.mjs";
+
+const ROT_PLAN = {
+  demo: false,
+  sessions: [{ id: "S3", title: "Styrka 3" }, { id: "K", title: "Kondition" }, { id: "S1", title: "Styrka 1" }, { id: "S2", title: "Styrka 2" }],
+};
+const hist = (catalogId, completedAt, setCount = 5, extra = {}) => ({ sessionId: `${catalogId}-${completedAt}`, catalogId, completedAt, setCount, planDemo: false, ...extra });
+
+test("rotation: S3 → K → S1 → S2 → S3 from latest finished pass", () => {
+  assert.equal(suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:42:35Z")]).catalog.id, "K");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z")]).catalog.id, "S1");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S1", "2026-11-20T10:00:00Z")]).catalog.id, "S2");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S2", "2026-11-22T10:00:00Z")]).catalog.id, "S3");
+  const s = suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:42:35Z")]);
+  assert.equal(s.last.catalogId, "S3");
+});
+
+test("rotation: empty or zero-set ends do not move the rotation", () => {
+  const h = [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z", 0)];
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: demo history is ignored for a real plan and vice versa", () => {
+  const h = [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z", 3, { planDemo: true })];
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: explicit warning when it cannot compute", () => {
+  const none = suggestNext(ROT_PLAN, []);
+  assert.equal(none.ok, false);
+  assert.equal(none.reason, "no_history");
+  assert.match(none.message, /Kan inte räkna ut nästa pass/);
+  const unknown = suggestNext(ROT_PLAN, [hist("X9", "2026-11-10T11:00:00Z")]);
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.reason, "unknown_last");
+  assert.match(unknown.message, /X9/);
+  assert.equal(suggestNext({ sessions: [] }, []).reason, "no_plan");
+  assert.deepEqual(orderedSessions(ROT_PLAN, none).map((x) => x.id), ["S3", "K", "S1", "S2"]);
+});
+
+test("rotation: suggested pass is sorted first", () => {
+  const s = suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:00:00Z")]);
+  assert.deepEqual(orderedSessions(ROT_PLAN, s).map((x) => x.id), ["K", "S3", "S1", "S2"]);
+});
+
+test("rotation: local history uses done sessions and their set events; abandoned does not count", () => {
+  const sessions = [
+    { id: "a", phase: "done", catalogId: "S3", title: "S3", completedAt: "2026-11-10T11:00:00Z", planDemo: false },
+    { id: "b", phase: "abandoned", catalogId: "K", planDemo: false },
+  ];
+  const events = [
+    { sessionId: "a", type: "completion" },
+    { sessionId: "b", type: "completion" },
+    { sessionId: "a", type: "session_completed", completedAt: "2026-11-10T11:00:00Z", catalogId: "S3" },
+  ];
+  const h = localHistory(sessions, events);
+  assert.equal(h.length, 1);
+  assert.equal(h[0].setCount, 1);
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: markers and merge dedupe by session id", () => {
+  const raw = { type: "session_completed", sessionId: "demo-s", catalogId: "S3", sessionTitle: "Styrka 3", completedAt: "2026-11-10T11:00:00.000Z", setEventIds: ["1", "2"], planDemo: false };
+  const m = markerToHistory(raw);
+  assert.equal(m.setCount, 2);
+  const cached = markerToHistory({ sessionId: "demo-s", catalogId: "S3", completedAt: raw.completedAt, setCount: 2 });
+  assert.equal(cached.setCount, 2);
+  assert.equal(mergeHistory([m], [cached]).length, 1);
+  assert.equal(markerToHistory({ type: "completion" }), null);
+});
+
+test("rotation: tree listing finds only completed markers", () => {
+  const ids = completedPathsFromTree({
+    tree: [
+      { type: "blob", path: "sessions/11111111-2222-4333-8444-555555555555/completed.json" },
+      { type: "blob", path: "sessions/11111111-2222-4333-8444-555555555555/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.json" },
+      { type: "tree", path: "sessions/66666666-7777-4888-9999-000000000000" },
+      { type: "blob", path: "plans/current.json" },
+    ],
+  });
+  assert.deepEqual(ids, ["11111111-2222-4333-8444-555555555555"]);
+});
+
+test("fetchCompletedMarkers reads tree + new markers only, GET only", async () => {
+  const sid = "11111111-2222-4333-8444-555555555555";
+  const cachedId = "66666666-7777-4888-9999-000000000000";
+  const calls = [];
+  const marker = { type: "session_completed", sessionId: sid, catalogId: "S3", sessionTitle: "Styrka 3", completedAt: "2026-11-10T11:00:00.000Z", setEventIds: ["a", "b", "c"], planDemo: false };
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, method: init.method });
+    const json = (status, body) => ({ status, headers: new Map(), text: async () => JSON.stringify(body) });
+    if (url.includes("/git/trees/")) {
+      return json(200, { truncated: false, tree: [
+        { type: "blob", path: `sessions/${sid}/completed.json` },
+        { type: "blob", path: `sessions/${cachedId}/completed.json` },
+      ] });
+    }
+    if (url.includes(`/contents/sessions/${sid}/completed.json`)) return json(200, { content: utf8ToBase64(JSON.stringify(marker)) });
+    return json(404, {});
+  };
+  const known = { [cachedId]: { sessionId: cachedId, catalogId: "K", completedAt: "2026-11-01T10:00:00Z", setCount: 4 } };
+  const got = await fetchCompletedMarkers(fetchImpl, { target: TARGET, token: "t", known });
+  assert.equal(got.kind, "ok");
+  assert.equal(got.markers[sid].catalogId, "S3");
+  assert.equal(got.markers[sid].setCount, 3);
+  assert.equal(got.markers[cachedId].catalogId, "K");
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((c) => c.method === "GET"));
+  assert.equal(treeUrl(TARGET), "https://api.github.com/repos/demo-owner/training-data/git/trees/main?recursive=1");
+  const bad = await fetchCompletedMarkers(async () => ({ status: 401, headers: new Map(), text: async () => "{}" }), { target: TARGET, token: "t" });
+  assert.notEqual(bad.kind, "ok");
+});
+
+test("shell lists rotation module in worker and Pages build", () => {
+  assert.match(readFileSync(new URL("../public/sw.js", import.meta.url), "utf8"), /"lib\/rotation\.mjs"/);
+  assert.match(readFileSync(new URL("../scripts/build-pages.mjs", import.meta.url), "utf8"), /"lib\/rotation\.mjs"/);
+});
+
+// ---- 5 s nedräkning ----
+import { COUNTDOWN_MS, countdownLeft, stepStartTime } from "../public/lib/engine.mjs";
+
+test("countdown: timed steps start 5 s after the tap, rep sets at once", () => {
+  assert.equal(COUNTDOWN_MS, 5000);
+  assert.equal(stepStartTime({ durationSeconds: 240 }, 1000), 6000);
+  assert.equal(stepStartTime({ durationSeconds: 0 }, 1000), 6000);
+  assert.equal(stepStartTime({ reps: { target: 8 } }, 1000), 1000);
+  const step = { durationSeconds: 30 };
+  const session = { stepStartedAt: 6000 };
+  assert.equal(countdownLeft(session, step, 1000), 5);
+  assert.equal(countdownLeft(session, step, 1001), 5);
+  assert.equal(countdownLeft(session, step, 2001), 4);
+  assert.equal(countdownLeft(session, step, 5001), 1);
+  assert.equal(countdownLeft(session, step, 6000), 0);
+  assert.equal(countdownLeft(session, { reps: {} }, 1000), 0);
+  assert.equal(elapsedSeconds(6000, 3000), 0, "no elapsed time during the countdown");
+});
+
+test("countdown: skip and rest-advance into a timed step add the lead-in", () => {
+  const snap = { steps: [{ id: "a", reps: {} }, { id: "b", durationSeconds: 240 }, { id: "c", reps: {} }] };
+  const base = { id: SID, stepIndex: 0, phase: "step", stepStartedAt: 0, skipped: [], rest: null, planSnapshot: snap };
+  assert.equal(skippedSession(base, 10_000).stepStartedAt, 15_000);
+  assert.equal(advancedAfterRest(base, {}, 10_000).stepStartedAt, 15_000);
+  const onTimed = { ...base, stepIndex: 1 };
+  assert.equal(skippedSession(onTimed, 10_000).stepStartedAt, 10_000);
+  assert.equal(advancedAfterRest(onTimed, {}, 10_000).stepStartedAt, 10_000);
+});
+
+test("rotation: short Swedish date without trailing dot", async () => {
+  const { shortDate } = await import("../public/lib/rotation.mjs");
+  assert.equal(shortDate("2026-11-10T11:00:00.000Z"), "10 nov");
+  assert.equal(shortDate("nope"), "okänt datum");
 });
