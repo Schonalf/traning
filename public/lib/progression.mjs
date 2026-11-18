@@ -27,7 +27,7 @@ export function weightStep(equipment, kg, direction = 1) {
     if (direction < 0 && kg > 10) return 2.5;
     return null; // no confirmed dumbbell grid at or below 10 kg
   }
-  if (equipment === "barbell") return 2.5;
+  // barbell: small plates exist, but exact total steps per gym are unconfirmed (PROGRAM.md §4c)
   if (equipment === "lat") {
     if (direction > 0 && kg === 59) return 7;
     if (direction < 0 && kg === 66) return 7;

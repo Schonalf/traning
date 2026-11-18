@@ -362,7 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
-  assert.match(sw, /CACHE_PREFIX\}v9/);
+  assert.match(sw, /CACHE_PREFIX\}v10/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -1041,7 +1041,7 @@ test("weight steps use only confirmed increments", () => {
   assert.equal(weightStep("dumbbell", 8, 1), null);
   assert.equal(weightStep("dumbbell", 12.5, -1), 2.5);
   assert.equal(weightStep("dumbbell", 10, -1), null);
-  assert.equal(weightStep("barbell", 60, 1), 2.5);
+  assert.equal(weightStep("barbell", 60, 1), null, "barbell steps unconfirmed");
   assert.equal(weightStep("lat", 59, 1), 7);
   assert.equal(weightStep("lat", 66, 1), null);
   assert.equal(weightStep("machine", 100, 1), null);
