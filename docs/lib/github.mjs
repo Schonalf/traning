@@ -359,3 +359,65 @@ export function formatPlanFetchOk(plan, when = new Date()) {
       : new Date(when).toLocaleString("sv-SE");
   return `Planen hämtad: ${title}, ${n} pass, ${time}`;
 }
+
+/** Recursive tree URL for the target branch (read-only listing). */
+export function treeUrl(target) {
+  const checked = validateTarget(target);
+  if (!checked.ok) throw new Error("bad-target");
+  return `${repoUrl(checked.target)}/git/trees/${encodeURIComponent(checked.target.branch)}?recursive=1`;
+}
+
+/**
+ * Read finished-session markers (sessions/<id>/completed.json) from the data repo.
+ * Read-only. `known` maps sessionId → cached marker; only new ids are fetched.
+ * Returns { kind: "ok", markers, truncated } or { kind, status }.
+ */
+export async function fetchCompletedMarkers(fetchImpl, { target, token, known = {}, maxFetch = 40, timeoutMs = 12_000 }) {
+  const checked = validateTarget(target);
+  if (!checked.ok || !token) return { kind: "client", status: 0 };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let tree;
+  try {
+    const res = await fetchImpl(treeUrl(checked.target), { method: "GET", headers: authHeaders(token), signal: controller.signal });
+    const body = await readJson(res);
+    const classified = classifyStatus(res.status, headerMap(res), body);
+    if (classified.kind !== "ok") return { kind: classified.kind, status: res.status };
+    tree = body;
+  } catch {
+    return { kind: "network", status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+  const ids = [];
+  for (const item of tree?.tree || []) {
+    if (item?.type !== "blob") continue;
+    const match = /^sessions\/([0-9a-f-]{36})\/completed\.json$/i.exec(String(item.path || ""));
+    if (match && isUuid(match[1])) ids.push(match[1].toLowerCase());
+  }
+  const markers = {};
+  let fetched = 0;
+  let failed = 0;
+  for (const id of ids) {
+    if (known[id]) {
+      markers[id] = known[id];
+      continue;
+    }
+    if (fetched >= maxFetch) continue;
+    fetched += 1;
+    const got = await getContentJson(fetchImpl, { target: checked.target, token, path: `sessions/${id}/completed.json`, timeoutMs });
+    if (got.kind === "ok" && got.json?.type === "session_completed") {
+      const m = got.json;
+      markers[id] = {
+        sessionId: id,
+        catalogId: String(m.catalogId || ""),
+        sessionTitle: String(m.sessionTitle || ""),
+        completedAt: String(m.completedAt || ""),
+        planDemo: Boolean(m.planDemo),
+        outcome: String(m.outcome || ""),
+        setCount: Array.isArray(m.setEventIds) ? m.setEventIds.length : 0,
+      };
+    } else failed += 1;
+  }
+  return { kind: "ok", markers, truncated: Boolean(tree?.truncated), failed };
+}

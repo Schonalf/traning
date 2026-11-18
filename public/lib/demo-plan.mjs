@@ -236,7 +236,7 @@ export function demoPlan() {
             side: "both",
             durationSeconds: 20,
             restSeconds: 8,
-            notes: "DEMO arbete. Nedräkningen går inte vidare av sig själv.",
+            notes: "DEMO arbete. Vid noll piper appen och går vidare själv.",
           }),
           step({
             id: "k-recovery",

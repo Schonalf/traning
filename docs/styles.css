@@ -111,3 +111,64 @@ dialog::backdrop { background: rgba(28, 25, 21, 0.45); }
   font-weight: 700;
 }
 .preview-actions { margin-top: 0.8rem; }
+
+/* Nästa pass */
+.small { font-size: 0.8rem; }
+.next-hero {
+  border: 3px solid var(--green);
+  background: #eaf5ef;
+  padding: 1rem;
+}
+.next-hero.next-missing { border-color: var(--warn); background: #fbeee6; }
+.next-label {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: var(--green);
+}
+.next-missing .next-label { color: var(--warn); }
+.next-title { font-size: 1.55rem; line-height: 1.2; margin: 0.25rem 0 0.35rem; }
+.next-id {
+  display: inline-block;
+  background: var(--green);
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.05rem 0.5rem;
+  margin-right: 0.2rem;
+}
+.next-start { width: 100%; font-size: 1.5rem; margin: 0.4rem 0 0.2rem; }
+.list-heading { margin: 1rem 0 0.4rem; font-size: 0.95rem; color: var(--muted); }
+.session-btn { display: block; width: 100%; margin: 0.4rem 0; }
+.session-btn.is-next { border: 2px solid var(--green); background: #eaf5ef; }
+.session-btn.is-other { opacity: 0.72; font-size: 0.95rem; }
+.next-badge {
+  display: inline-block;
+  background: var(--green);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  margin-right: 0.4rem;
+  font-size: 0.8rem;
+  vertical-align: middle;
+}
+
+/* 5 s nedräkning före tidsatt arbete */
+.countdown-label { margin: 0.4rem 0 0; font-weight: 800; color: var(--warn); font-size: 1.05rem; }
+.countdown-label.running { color: var(--green); }
+.clock.countdown {
+  font-size: 6.5rem;
+  line-height: 1;
+  font-weight: 800;
+  text-align: center;
+  color: var(--warn);
+  margin: 0.3rem 0;
+}
+
+/* RIR valfritt, sekundärt */
+.rir-details { font-size: 0.85rem; color: var(--muted); margin: 0.3rem 0; }
+.rir-details summary { cursor: pointer; padding: 0.3rem 0; }
+.progression h3 { font-size: 1rem; margin: 0.8rem 0 0.2rem; }
+.progression li { margin: 0.3rem 0; font-size: 0.92rem; }
+.countdown-label.done { color: var(--warn); }

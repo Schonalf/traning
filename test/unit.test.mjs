@@ -362,7 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
-  assert.match(sw, /CACHE_PREFIX\}v7/);
+  assert.match(sw, /CACHE_PREFIX\}v9/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -861,4 +861,263 @@ test("early-end payload marks time pressure and leaves the completed.json path u
   });
   assert.equal("endedEarly" in normal, false);
   assert.equal("mode" in normal, false);
+});
+
+// ---- Nästa pass (rotation) ----
+import { completedPathsFromTree, localHistory, markerToHistory, mergeHistory, orderedSessions, suggestNext } from "../public/lib/rotation.mjs";
+import { fetchCompletedMarkers, treeUrl } from "../public/lib/github.mjs";
+
+const ROT_PLAN = {
+  demo: false,
+  sessions: [{ id: "S3", title: "Styrka 3" }, { id: "K", title: "Kondition" }, { id: "S1", title: "Styrka 1" }, { id: "S2", title: "Styrka 2" }],
+};
+const hist = (catalogId, completedAt, setCount = 5, extra = {}) => ({ sessionId: `${catalogId}-${completedAt}`, catalogId, completedAt, setCount, planDemo: false, ...extra });
+
+test("rotation: S3 → K → S1 → S2 → S3 from latest finished pass", () => {
+  assert.equal(suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:42:35Z")]).catalog.id, "K");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z")]).catalog.id, "S1");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S1", "2026-11-20T10:00:00Z")]).catalog.id, "S2");
+  assert.equal(suggestNext(ROT_PLAN, [hist("S2", "2026-11-22T10:00:00Z")]).catalog.id, "S3");
+  const s = suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:42:35Z")]);
+  assert.equal(s.last.catalogId, "S3");
+});
+
+test("rotation: empty or zero-set ends do not move the rotation", () => {
+  const h = [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z", 0)];
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: demo history is ignored for a real plan and vice versa", () => {
+  const h = [hist("S3", "2026-11-10T11:00:00Z"), hist("K", "2026-11-18T10:00:00Z", 3, { planDemo: true })];
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: explicit warning when it cannot compute", () => {
+  const none = suggestNext(ROT_PLAN, []);
+  assert.equal(none.ok, false);
+  assert.equal(none.reason, "no_history");
+  assert.match(none.message, /Kan inte räkna ut nästa pass/);
+  const unknown = suggestNext(ROT_PLAN, [hist("X9", "2026-11-10T11:00:00Z")]);
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.reason, "unknown_last");
+  assert.match(unknown.message, /X9/);
+  assert.equal(suggestNext({ sessions: [] }, []).reason, "no_plan");
+  assert.deepEqual(orderedSessions(ROT_PLAN, none).map((x) => x.id), ["S3", "K", "S1", "S2"]);
+});
+
+test("rotation: suggested pass is sorted first", () => {
+  const s = suggestNext(ROT_PLAN, [hist("S3", "2026-11-10T11:00:00Z")]);
+  assert.deepEqual(orderedSessions(ROT_PLAN, s).map((x) => x.id), ["K", "S3", "S1", "S2"]);
+});
+
+test("rotation: local history uses done sessions and their set events; abandoned does not count", () => {
+  const sessions = [
+    { id: "a", phase: "done", catalogId: "S3", title: "S3", completedAt: "2026-11-10T11:00:00Z", planDemo: false },
+    { id: "b", phase: "abandoned", catalogId: "K", planDemo: false },
+  ];
+  const events = [
+    { sessionId: "a", type: "completion" },
+    { sessionId: "b", type: "completion" },
+    { sessionId: "a", type: "session_completed", completedAt: "2026-11-10T11:00:00Z", catalogId: "S3" },
+  ];
+  const h = localHistory(sessions, events);
+  assert.equal(h.length, 1);
+  assert.equal(h[0].setCount, 1);
+  assert.equal(suggestNext(ROT_PLAN, h).catalog.id, "K");
+});
+
+test("rotation: markers and merge dedupe by session id", () => {
+  const raw = { type: "session_completed", sessionId: "demo-s", catalogId: "S3", sessionTitle: "Styrka 3", completedAt: "2026-11-10T11:00:00.000Z", setEventIds: ["1", "2"], planDemo: false };
+  const m = markerToHistory(raw);
+  assert.equal(m.setCount, 2);
+  const cached = markerToHistory({ sessionId: "demo-s", catalogId: "S3", completedAt: raw.completedAt, setCount: 2 });
+  assert.equal(cached.setCount, 2);
+  assert.equal(mergeHistory([m], [cached]).length, 1);
+  assert.equal(markerToHistory({ type: "completion" }), null);
+});
+
+test("rotation: tree listing finds only completed markers", () => {
+  const ids = completedPathsFromTree({
+    tree: [
+      { type: "blob", path: "sessions/11111111-2222-4333-8444-555555555555/completed.json" },
+      { type: "blob", path: "sessions/11111111-2222-4333-8444-555555555555/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.json" },
+      { type: "tree", path: "sessions/66666666-7777-4888-9999-000000000000" },
+      { type: "blob", path: "plans/current.json" },
+    ],
+  });
+  assert.deepEqual(ids, ["11111111-2222-4333-8444-555555555555"]);
+});
+
+test("fetchCompletedMarkers reads tree + new markers only, GET only", async () => {
+  const sid = "11111111-2222-4333-8444-555555555555";
+  const cachedId = "66666666-7777-4888-9999-000000000000";
+  const calls = [];
+  const marker = { type: "session_completed", sessionId: sid, catalogId: "S3", sessionTitle: "Styrka 3", completedAt: "2026-11-10T11:00:00.000Z", setEventIds: ["a", "b", "c"], planDemo: false };
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, method: init.method });
+    const json = (status, body) => ({ status, headers: new Map(), text: async () => JSON.stringify(body) });
+    if (url.includes("/git/trees/")) {
+      return json(200, { truncated: false, tree: [
+        { type: "blob", path: `sessions/${sid}/completed.json` },
+        { type: "blob", path: `sessions/${cachedId}/completed.json` },
+      ] });
+    }
+    if (url.includes(`/contents/sessions/${sid}/completed.json`)) return json(200, { content: utf8ToBase64(JSON.stringify(marker)) });
+    return json(404, {});
+  };
+  const known = { [cachedId]: { sessionId: cachedId, catalogId: "K", completedAt: "2026-11-01T10:00:00Z", setCount: 4 } };
+  const got = await fetchCompletedMarkers(fetchImpl, { target: TARGET, token: "t", known });
+  assert.equal(got.kind, "ok");
+  assert.equal(got.markers[sid].catalogId, "S3");
+  assert.equal(got.markers[sid].setCount, 3);
+  assert.equal(got.markers[cachedId].catalogId, "K");
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((c) => c.method === "GET"));
+  assert.equal(treeUrl(TARGET), "https://api.github.com/repos/demo-owner/training-data/git/trees/main?recursive=1");
+  const bad = await fetchCompletedMarkers(async () => ({ status: 401, headers: new Map(), text: async () => "{}" }), { target: TARGET, token: "t" });
+  assert.notEqual(bad.kind, "ok");
+});
+
+test("shell lists rotation module in worker and Pages build", () => {
+  assert.match(readFileSync(new URL("../public/sw.js", import.meta.url), "utf8"), /"lib\/rotation\.mjs"/);
+  assert.match(readFileSync(new URL("../scripts/build-pages.mjs", import.meta.url), "utf8"), /"lib\/rotation\.mjs"/);
+});
+
+// ---- 5 s nedräkning ----
+import { COUNTDOWN_MS, countdownLeft, stepStartTime } from "../public/lib/engine.mjs";
+
+test("countdown: timed steps start 5 s after the tap, rep sets at once", () => {
+  assert.equal(COUNTDOWN_MS, 5000);
+  assert.equal(stepStartTime({ durationSeconds: 240 }, 1000), 6000);
+  assert.equal(stepStartTime({ durationSeconds: 0 }, 1000), 6000);
+  assert.equal(stepStartTime({ reps: { target: 8 } }, 1000), 1000);
+  const step = { durationSeconds: 30 };
+  const session = { stepStartedAt: 6000 };
+  assert.equal(countdownLeft(session, step, 1000), 5);
+  assert.equal(countdownLeft(session, step, 1001), 5);
+  assert.equal(countdownLeft(session, step, 2001), 4);
+  assert.equal(countdownLeft(session, step, 5001), 1);
+  assert.equal(countdownLeft(session, step, 6000), 0);
+  assert.equal(countdownLeft(session, { reps: {} }, 1000), 0);
+  assert.equal(elapsedSeconds(6000, 3000), 0, "no elapsed time during the countdown");
+});
+
+test("countdown: skip and rest-advance into a timed step add the lead-in", () => {
+  const snap = { steps: [{ id: "a", reps: {} }, { id: "b", durationSeconds: 240 }, { id: "c", reps: {} }] };
+  const base = { id: SID, stepIndex: 0, phase: "step", stepStartedAt: 0, skipped: [], rest: null, planSnapshot: snap };
+  assert.equal(skippedSession(base, 10_000).stepStartedAt, 15_000);
+  assert.equal(advancedAfterRest(base, {}, 10_000).stepStartedAt, 15_000);
+  const onTimed = { ...base, stepIndex: 1 };
+  assert.equal(skippedSession(onTimed, 10_000).stepStartedAt, 10_000);
+  assert.equal(advancedAfterRest(onTimed, {}, 10_000).stepStartedAt, 10_000);
+});
+
+test("rotation: short Swedish date without trailing dot", async () => {
+  const { shortDate } = await import("../public/lib/rotation.mjs");
+  assert.equal(shortDate("2026-11-10T11:00:00.000Z"), "10 nov");
+  assert.equal(shortDate("nope"), "okänt datum");
+});
+
+// ---- RIR valfritt + progression efter vikt × reps ----
+import { effectiveSets, progressionForSession, rirApplies, weightStep } from "../public/lib/progression.mjs";
+
+test("RIR only applies to strength work sets", () => {
+  assert.equal(rirApplies({ phase: "work", reps: { min: 8, max: 10 } }), true);
+  assert.equal(rirApplies({ phase: "warmup", reps: { min: 8, max: 8 } }), false);
+  assert.equal(rirApplies({ phase: "cardio", durationSeconds: 240 }), false);
+  assert.equal(rirApplies({ phase: "mobility", durationSeconds: 120 }), false);
+  assert.equal(rirApplies({ phase: "work", reps: null, durationSeconds: 30 }), false, "holds have no RIR");
+  const hold = { id: "h", phase: "work", equipment: "bodyweight", load: null, reps: null, durationSeconds: 30 };
+  assert.equal(buildActual(hold, { rir: "2" }).actual.rir, null, "RIR dropped on a hold");
+  const work = { id: "w", phase: "work", equipment: "barbell", load: { unit: "kg", mode: "total", value: 60 }, reps: { min: 5, max: 8, target: 5 } };
+  const noRir = buildActual(work, { weight: "60", reps: "8", rir: "" });
+  assert.equal(noRir.ok, true, "RIR never required");
+  assert.equal(noRir.actual.rir, null);
+});
+
+test("weight steps use only confirmed increments", () => {
+  assert.equal(weightStep("dumbbell", 30, 1), 2.5);
+  assert.equal(weightStep("dumbbell", 10, 1), 2.5);
+  assert.equal(weightStep("dumbbell", 8, 1), null);
+  assert.equal(weightStep("dumbbell", 12.5, -1), 2.5);
+  assert.equal(weightStep("dumbbell", 10, -1), null);
+  assert.equal(weightStep("barbell", 60, 1), 2.5);
+  assert.equal(weightStep("lat", 59, 1), 7);
+  assert.equal(weightStep("lat", 66, 1), null);
+  assert.equal(weightStep("machine", 100, 1), null);
+});
+
+function progSession(reps, { weight = 30, equipment = "dumbbell", priority = 2, durationSeconds = null, rir = null, revise = null } = {}) {
+  const steps = reps.map((_, i) => ({ id: `p${i}`, exercise: "Lutande hantelpress", phase: "work", equipment, load: { unit: "kg", mode: "per_hand", value: weight }, reps: { min: 8, max: 10, target: 8 }, rir: 2, priority, durationSeconds }));
+  steps.unshift({ id: "wu", exercise: "Lutande hantelpress", phase: "warmup", equipment, load: { unit: "kg", mode: "per_hand", value: 17.5 }, reps: { min: 3, max: 3, target: 3 }, rir: null, priority });
+  const events = [{ eventId: "e-wu", sessionId: "S", type: "completion", stepId: "wu", actual: { weightKg: 17.5, reps: 3, rir: null } }];
+  reps.forEach((r, i) => events.push({ eventId: `e${i}`, sessionId: "S", type: "completion", stepId: `p${i}`, actual: { weightKg: weight, reps: r, rir } }));
+  if (revise) events.push({ eventId: "rev", sessionId: "S", type: "revision", stepId: revise.stepId, revisesEventId: revise.of, actual: { weightKg: weight, reps: revise.reps, rir: null } });
+  return progressionForSession(steps, events, "S");
+}
+
+test("double progression: all sets at top → +2,5 kg, no RIR needed", () => {
+  const [p] = progSession([10, 10]);
+  assert.equal(p.decision, "increase");
+  assert.equal(p.nextKg, 32.5);
+  assert.equal(p.sets, 2, "warmup is not a work set");
+  assert.match(p.text, /32,5 kg/);
+});
+
+test("double progression: RIR value does not change the decision", () => {
+  assert.equal(progSession([10, 10], { rir: 4 })[0].decision, "increase");
+  assert.equal(progSession([10, 10], { rir: 0 })[0].decision, "increase");
+  assert.equal(progSession([9, 8], { rir: 0 })[0].decision, "reps");
+});
+
+test("double progression: within range keep + reps, some below keep, all below reduce", () => {
+  assert.equal(progSession([10, 9])[0].decision, "reps");
+  assert.equal(progSession([9, 7])[0].decision, "keep");
+  const down = progSession([6, 5])[0];
+  assert.equal(down.decision, "reduce");
+  assert.equal(down.nextKg, 27.5);
+});
+
+test("double progression: revision replaces the revised set", () => {
+  assert.equal(progSession([10, 10], { revise: { stepId: "p1", of: "e1", reps: 9 } })[0].decision, "reps");
+});
+
+test("double progression: unknown step and rehab caveat", () => {
+  const machine = progSession([10, 10], { equipment: "machine", weight: 100 })[0];
+  assert.equal(machine.decision, "increase");
+  assert.equal(machine.nextKg, null);
+  assert.match(machine.text, /inte känt/);
+  const rehab = progSession([10, 10], { priority: 1, durationSeconds: 56, weight: 17.5 })[0];
+  assert.match(rehab.text, /smärtan var ≤3\/10/);
+});
+
+test("effectiveSets ignores other sessions", () => {
+  const map = effectiveSets([{ sessionId: "A", type: "completion", stepId: "x", eventId: "1" }, { sessionId: "B", type: "completion", stepId: "y", eventId: "2" }], "A");
+  assert.deepEqual([...map.keys()], ["x"]);
+});
+
+// ---- Övertid bara för stretch/rörlighet ----
+import { timerKind, workSecondsLeft } from "../public/lib/engine.mjs";
+
+test("timer kind: overtime only for stretch/mobility", () => {
+  assert.equal(timerKind({ phase: "mobility", exercise: "90/90-höft", durationSeconds: 120 }), "overtime");
+  assert.equal(timerKind({ phase: "warmup", exercise: "Rörlighet höft och bröstkorg", durationSeconds: 20 }), "overtime");
+  assert.equal(timerKind({ phase: "cardio", exercise: "Assault bike – hård intervall 1/4", durationSeconds: 240, load: null, reps: null }), "auto");
+  assert.equal(timerKind({ phase: "recovery", exercise: "Assault bike – lugnt", durationSeconds: 180 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Sidplanka – vänster", durationSeconds: 30 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Häng i stång", durationSeconds: 30 }), "auto");
+  assert.equal(timerKind({ phase: "warmup", exercise: "Assault bike – lugn uppvärmning", durationSeconds: 600 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Sittande vadlyft", durationSeconds: 56, load: { value: 17.5 }, reps: { min: 8, max: 12 } }), "stop");
+  assert.equal(timerKind({ phase: "work", exercise: "Bänkpress", durationSeconds: null }), null);
+});
+
+test("timer: non-stretch stops at 0, stretch runs into overtime", () => {
+  const session = { stepStartedAt: 0 };
+  const interval = { phase: "cardio", exercise: "Intervall", durationSeconds: 240 };
+  const stretch = { phase: "mobility", exercise: "90/90-höft", durationSeconds: 120 };
+  assert.equal(workSecondsLeft(session, interval, 100_000), 140);
+  assert.equal(workSecondsLeft(session, interval, 240_000), 0);
+  assert.equal(workSecondsLeft(session, interval, 300_000), 0, "no negative time for intervals");
+  assert.equal(workSecondsLeft(session, stretch, 150_000), -30, "stretch may run over");
+  assert.equal(workSecondsLeft({ stepStartedAt: 5000 }, interval, 1000), 240, "countdown is not work time");
 });

@@ -29,7 +29,9 @@ export function buildActual(step, form) {
     else reps = parsed.value;
   }
   let rir = null;
-  if (form.rir != null && String(form.rir).trim() !== "") {
+  // RIR is optional and only kept on strength work sets; never required to save.
+  const rirOk = step.phase === "work" && Boolean(step.reps);
+  if (rirOk && form.rir != null && String(form.rir).trim() !== "") {
     const parsed = parseLooseNumber(form.rir);
     if (!parsed.ok || !Number.isInteger(parsed.value) || parsed.value < 0 || parsed.value > 10) {
       errors.push("RIR måste vara heltal 0–10 eller tomt.");
@@ -113,6 +115,47 @@ export function sessionCompletedEvent({ session, events, nowIso, eventId }) {
 
 }
 
+/** Lead-in before a timed work step (holds, intervals, mobility timers). */
+export const COUNTDOWN_MS = 5000;
+
+/** Start time for a step: timed steps start after a 5 s countdown, others at once. */
+export function stepStartTime(step, now) {
+  return step && step.durationSeconds != null ? now + COUNTDOWN_MS : now;
+}
+
+/** Whole seconds left of the lead-in countdown (5…1), or 0 when the work timer runs. */
+export function countdownLeft(session, step, now) {
+  if (!session || !step || step.durationSeconds == null || typeof session.stepStartedAt !== "number") return 0;
+  const ms = session.stepStartedAt - now;
+  if (ms <= 0) return 0;
+  return Math.min(Math.ceil(COUNTDOWN_MS / 1000), Math.ceil(ms / 1000));
+}
+
+const STRETCH_RE = /rörlighet|stretch|töj/i;
+
+/**
+ * How a timed step ends.
+ * - "overtime": stretch/mobility holds may run past zero ("Över tid") until Klar.
+ * - "auto": timed work without weight or reps (intervals, 4×4 parts, hangs, planks,
+ *   easy warmups) stops at zero, signals and saves itself, then moves on.
+ * - "stop": timed sets that need reps/weight stop at 00:00 and wait for Klar.
+ * - null: no timer.
+ */
+export function timerKind(step) {
+  if (!step || step.durationSeconds == null) return null;
+  if (step.phase === "mobility" || STRETCH_RE.test(String(step.exercise || ""))) return "overtime";
+  if (!step.load && !step.reps) return "auto";
+  return "stop";
+}
+
+/** Seconds of work left (never below 0 unless overtime is allowed). */
+export function workSecondsLeft(session, step, now) {
+  if (!step || step.durationSeconds == null || typeof session?.stepStartedAt !== "number") return null;
+  const elapsed = now < session.stepStartedAt ? 0 : Math.floor((now - session.stepStartedAt) / 1000);
+  const left = step.durationSeconds - Math.min(7200, elapsed);
+  return timerKind(step) === "overtime" ? left : Math.max(0, left);
+}
+
 export function skippedSession(session, now) {
   const step = session.planSnapshot.steps[session.stepIndex];
   const next = session.stepIndex + 1;
@@ -122,7 +165,7 @@ export function skippedSession(session, now) {
     skipped: [...(session.skipped || []), step.id],
     phase: done ? "done" : "step",
     stepIndex: done ? session.stepIndex : next,
-    stepStartedAt: done ? session.stepStartedAt : now,
+    stepStartedAt: done ? session.stepStartedAt : stepStartTime(session.planSnapshot.steps[next], now),
     rest: null,
   };
 }
@@ -133,7 +176,7 @@ export function advancedAfterRest(session, restState, now) {
     stepIndex: session.stepIndex + 1,
     phase: "step",
     rest: restState,
-    stepStartedAt: now,
+    stepStartedAt: stepStartTime(session.planSnapshot.steps[session.stepIndex + 1], now),
   };
 }
 

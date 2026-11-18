@@ -1,8 +1,10 @@
 import { demoPlan } from "./lib/demo-plan.mjs";
 import { loadModeLabel, sideLabel } from "./lib/equipment.mjs";
 import { buildBackup } from "./lib/export.mjs";
-import { advancedAfterRest, buildActual, completionEvent, newId, sessionCompletedEvent, skippedSession } from "./lib/engine.mjs";
-import { formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
+import { COUNTDOWN_MS, advancedAfterRest, buildActual, completionEvent, countdownLeft, newId, sessionCompletedEvent, skippedSession, stepStartTime, timerKind, workSecondsLeft } from "./lib/engine.mjs";
+import { fetchCompletedMarkers, formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
+import { progressionForSession, rirApplies } from "./lib/progression.mjs";
+import { localHistory, markerToHistory, mergeHistory, orderedSessions, shortDate, suggestNext } from "./lib/rotation.mjs";
 import { elapsedSeconds, formatClock, startRest, tickRest } from "./lib/rest.mjs";
 import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
 import {
@@ -42,7 +44,11 @@ const state = {
   wakeNote: "",
   fragmentNote: "",
   syncing: false,
+  remote: { markers: {}, fetchedAt: null, targetKey: "" },
+  remoteStatus: "idle",
 };
+
+const APP_VERSION = "2026-11-18-nasta-pass-nedrakning-rir-tid";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -151,6 +157,8 @@ async function loadAll() {
     state.tokenSaved = true;
   }
   if (targetRow?.value) state.target = { ...state.target, ...targetRow.value };
+  const remoteRow = (settings || []).find((item) => item.id === "remoteHistory");
+  if (remoteRow?.value?.markers && remoteRow.value.targetKey === targetKey()) state.remote = remoteRow.value;
   state.active = state.sessions.find((item) => item.phase === "step" || item.phase === "rest") || null;
   if (!state.plan) {
     const demo = validatePlan(demoPlan());
@@ -222,6 +230,11 @@ function statusMessage() {
   return `${offline}Sparat på telefonen: ${saved}. Väntar på server: ${pending}. Bekräftat av servern: ${acked}.${pause}${note}`;
 }
 
+function rirLine(step) {
+  if (!rirApplies(step)) return null;
+  return text("p", `RIR (valfritt): ${step.rir == null ? "–" : step.rir}`, { class: "muted small", "data-testid": "rir-line" });
+}
+
 function phaseLabel(phase) {
   return { warmup: "Uppvärmning", work: "Arbetsset", cardio: "Intervall", recovery: "Återhämtning", mobility: "Rörlighet" }[phase] || phase;
 }
@@ -249,26 +262,26 @@ function unlockAudio() {
   }
 }
 
-function beep() {
+function beep(frequency = 880, seconds = 0.12) {
   if (!state.audio) return;
   try {
     const osc = state.audio.createOscillator();
     const gain = state.audio.createGain();
-    osc.frequency.value = 880;
+    osc.frequency.value = frequency;
     gain.gain.setValueAtTime(0.0001, state.audio.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.2, state.audio.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, state.audio.currentTime + 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.0001, state.audio.currentTime + seconds);
     osc.connect(gain);
     gain.connect(state.audio.destination);
     osc.start();
-    osc.stop(state.audio.currentTime + 0.13);
+    osc.stop(state.audio.currentTime + seconds + 0.01);
   } catch {
     state.audioNote = "Pipet kunde inte spelas. Passet fortsätter.";
   }
 }
 
-function buzz() {
-  if (typeof navigator.vibrate === "function") navigator.vibrate(80);
+function buzz(ms = 80) {
+  if (typeof navigator.vibrate === "function") navigator.vibrate(ms);
 }
 
 async function requestWake() {
@@ -360,6 +373,7 @@ async function boot() {
   window.addEventListener("offline", () => render());
   schedule();
   flush().catch(() => {});
+  refreshRemoteHistory().catch(() => {});
 }
 
 function schedule() {
@@ -380,6 +394,80 @@ function showPersistBanner() {
     return;
   }
   node.textContent = state.persistError;
+}
+
+function targetKey() {
+  const t = state.target || {};
+  return `${t.owner || ""}/${t.repo || ""}@${t.branch || ""}`;
+}
+
+function currentHistory() {
+  const remote = Object.values(state.remote?.markers || {}).map(markerToHistory).filter(Boolean);
+  return mergeHistory(localHistory(state.sessions, state.events), remote);
+}
+
+function currentSuggestion() {
+  return suggestNext(state.plan, currentHistory(), { demo: Boolean(state.plan?.demo) });
+}
+
+/** Read finished-session markers from the data repo (read-only) and cache them on the phone. */
+async function refreshRemoteHistory() {
+  if (!state.token || !validateTarget(state.target).ok) return;
+  if (state.remoteStatus === "loading") return;
+  state.remoteStatus = "loading";
+  const key = targetKey();
+  const known = state.remote?.targetKey === key ? state.remote.markers || {} : {};
+  const got = await fetchCompletedMarkers(fetch, { target: validateTarget(state.target).target, token: state.token, known });
+  if (got.kind !== "ok") {
+    state.remoteStatus = got.kind === "network" ? "network" : `fel-${got.status || got.kind}`;
+  } else {
+    state.remote = { markers: got.markers, fetchedAt: new Date().toISOString(), targetKey: key };
+    state.remoteStatus = got.failed ? "partial" : "ok";
+    try {
+      await withDb(["settings"], "readwrite", async (stores) => stores.settings.put({ id: "remoteHistory", value: state.remote }));
+    } catch {
+      /* cache is optional */
+    }
+  }
+  if (!state.active && state.view === "home" && !state.focusId && !document.querySelector("dialog[open]")) render();
+}
+
+function remoteNote() {
+  const connected = state.token && validateTarget(state.target).ok;
+  const when = state.remote?.fetchedAt ? shortDate(state.remote.fetchedAt) : null;
+  if (state.remoteStatus === "loading") return { warn: false, text: "Läser avslutade pass från GitHub …" };
+  if (state.remoteStatus === "network") return { warn: true, text: `GitHub nåddes inte. Förslaget bygger på telefonens historik${when ? ` och GitHub-läsning ${when}` : ""}.` };
+  if (state.remoteStatus.startsWith("fel-")) return { warn: true, text: `GitHub-historiken kunde inte läsas (${state.remoteStatus.slice(4)}). Förslaget bygger på telefonens historik.` };
+  if (state.remoteStatus === "partial") return { warn: true, text: "Några avslutade pass på GitHub kunde inte läsas. Förslaget kan vara fel." };
+  if (!connected && !when) return { warn: false, text: "Bygger på telefonens historik. Lägg in token under Inställningar för att även läsa GitHub." };
+  if (!connected) return { warn: false, text: `Bygger på telefonens historik och GitHub-läsning ${when}.` };
+  return { warn: false, text: `Bygger på telefonens historik och GitHub${when ? ` (läst ${when})` : ""}.` };
+}
+
+function renderNextHero(suggestion) {
+  const note = remoteNote();
+  const demoWarn = state.planMeta?.source === "demo"
+    ? text("p", "Obs: DEMO-planen visas. Hämta din riktiga plan under Inställningar.", { class: "warn", "data-testid": "next-demo-warn" })
+    : null;
+  if (!suggestion.ok) {
+    return el("section", { class: "card next-hero next-missing", "data-testid": "next-hero" }, [
+      text("p", "Nästa pass", { class: "next-label" }),
+      text("p", suggestion.message, { class: "warn", "data-testid": "next-warning" }),
+      text("p", "Välj själv i listan nedan. Rotationen är planens ordning.", { class: "muted" }),
+      demoWarn,
+      text("p", note.text, { class: note.warn ? "warn" : "muted", "data-testid": "next-source" }),
+    ]);
+  }
+  const { catalog, last } = suggestion;
+  return el("section", { class: "card next-hero", "data-testid": "next-hero", "data-next": catalog.id }, [
+    text("p", "Nästa pass", { class: "next-label" }),
+    el("h2", { class: "next-title", "data-testid": "next-title" }, [text("span", catalog.id, { class: "next-id" }), ` ${catalog.title}`]),
+    text("p", `Senast avslutat: ${last.title || last.catalogId}, ${shortDate(last.completedAt).replace(/\.$/, "")}.`, { class: "muted", "data-testid": "next-last" }),
+    el("button", { class: "klar next-start", type: "button", "data-testid": "next-start", onclick: () => openPreview(catalog) }, [`Starta ${catalog.id}`]),
+    text("p", "Öppnar passet. Inget startas förrän du trycker Start.", { class: "muted" }),
+    demoWarn,
+    note.warn ? text("p", note.text, { class: "warn", "data-testid": "next-source" }) : text("p", note.text, { class: "muted small", "data-testid": "next-source" }),
+  ]);
 }
 
 function headingTitle() {
@@ -426,6 +514,8 @@ function toggleSettings() {
 
 function renderHome() {
   const when = state.planMeta?.validatedAt ? new Date(state.planMeta.validatedAt).toLocaleString("sv-SE") : "inte hämtad";
+  const suggestion = currentSuggestion();
+  app.append(renderNextHero(suggestion));
   app.append(
     el("section", { class: "card" }, [
       text("p", state.plan?.disclaimer || "", { class: "demo-flag", "data-testid": "disclaimer" }),
@@ -434,16 +524,26 @@ function renderHome() {
       text("p", "Låst skärm: ett pip är inte garanterat. Webbläsaren kan tysta ljud när skärmen är låst.", { class: "muted" }),
     ])
   );
-  for (const session of state.plan.sessions) {
+  app.append(text("h3", suggestion.ok ? "Alla pass (nästa först)" : "Alla pass", { class: "list-heading" }));
+  for (const session of orderedSessions(state.plan, suggestion)) {
+    const isNext = suggestion.ok && suggestion.catalog.id === session.id;
     app.append(
       el("button", {
-        class: "session-btn",
+        class: isNext ? "session-btn is-next" : "session-btn is-other",
         type: "button",
         "data-testid": `start-${session.id}`,
+        "data-next": isNext ? "true" : "false",
         onclick: () => openPreview(session),
-      }, [text("strong", session.title), text("div", `${session.location} · ${session.steps.length} steg · tryck för att se passet`, { class: "muted" })])
+      }, [
+        el("strong", {}, [
+          isNext ? text("span", "Nästa", { class: "next-badge", "data-testid": "next-badge" }) : null,
+          session.title,
+        ]),
+        text("div", `${session.location} · ${session.steps.length} steg · ${isNext ? "tryck för att se passet" : "inte på tur"}`, { class: "muted" }),
+      ])
     );
   }
+  app.append(text("p", `Version ${APP_VERSION}`, { class: "muted small", "data-testid": "app-version" }));
 }
 
 let starting = false;
@@ -494,6 +594,17 @@ function previewStepLines(step) {
   ]);
 }
 
+function previewNextLine(catalog) {
+  const suggestion = currentSuggestion();
+  if (suggestion.ok && suggestion.catalog.id === catalog.id) {
+    return text("p", "Nästa pass i rotationen ✓", { class: "ok", "data-testid": "preview-is-next" });
+  }
+  if (suggestion.ok) {
+    return text("p", `Obs: inte nästa pass. Nästa på tur är ${suggestion.catalog.id} ${suggestion.catalog.title}.`, { class: "warn", "data-testid": "preview-not-next" });
+  }
+  return null;
+}
+
 function renderPreview() {
   const catalog = state.preview.catalog;
   const mode = previewMode(state.preview.mode);
@@ -536,6 +647,7 @@ function renderPreview() {
   const fullLabel = `Fullpass (~${estimatedMinutes(estimates.fullSeconds)} min)`;
   app.append(
     el("section", { class: "card", "data-testid": "preview-view" }, [
+      previewNextLine(catalog),
       text("p", `${catalog.location} · ${selected.steps.length} steg i valt läge`, { class: "muted", "data-testid": "preview-meta" }),
       text("p", "Inget pass startas förrän du trycker Start.", { class: "muted" }),
       el("div", { class: "mode-toggle", role: "group", "aria-label": "Passläge" }, [
@@ -585,7 +697,7 @@ async function startSession(catalog, { mode = "full" } = {}) {
     rest: null,
     drafts: {},
     skipped: [],
-    stepStartedAt: Date.now(),
+    stepStartedAt: stepStartTime(prepared.catalog.steps[0], Date.now()),
     revisions: {},
     mode: prepared.mode,
     omittedExercises: prepared.omittedExercises,
@@ -616,7 +728,7 @@ function renderSession() {
     text("p", `Utrustning: ${equipmentLabel(step.equipment)}`),
     text("p", weightLine(step)),
     text("p", repsLine(step)),
-    text("p", `RIR: ${step.rir == null ? "valfritt" : step.rir}`),
+    rirLine(step),
     step.durationSeconds != null ? text("p", `Tid: ${step.durationSeconds} s`, { "data-testid": "duration-prescribed" }) : null,
     step.notes ? text("p", step.notes, { class: "muted" }) : null,
     ...stepExtraLines(step),
@@ -627,8 +739,18 @@ function renderSession() {
     prescribed,
   ]);
   if (step.durationSeconds != null) {
-    card.append(text("p", liveDurationText(session, step), { class: "clock", "data-testid": "duration-clock" }));
-    card.append(text("p", "Nedräkningen går inte vidare själv. Tryck Klar när du är färdig.", { class: "muted" }));
+    const left = countdownLeft(session, step, Date.now());
+    if (!left) countdownShown = 0;
+    card.insertBefore(text("p", left ? "Gör dig redo – tiden startar om" : "Tiden går", { class: left ? "countdown-label" : "countdown-label running", "data-testid": "countdown-label" }), prescribed);
+    card.insertBefore(text("p", left ? String(left) : liveDurationText(session, step), { class: left ? "clock countdown" : "clock", "data-testid": "duration-clock", "data-countdown": String(left) }), prescribed);
+    const kind = timerKind(step);
+    const hint = kind === "overtime"
+      ? "Stretch: tiden får gå över om du vill förlänga. Tryck Klar när du är färdig."
+      : kind === "auto"
+        ? "Vid noll piper appen, sparar steget och går vidare själv. Klar avslutar tidigare."
+        : "Tiden stannar på noll. Tryck Klar och fyll i reps.";
+    card.append(text("p", hint, { class: "muted", "data-testid": "timer-hint", "data-kind": kind }));
+    card.append(el("button", { class: "ghost", type: "button", "data-testid": "restart-countdown", onclick: restartCountdown }, ["Starta om tiden (5 s nedräkning)"]));
   }
   card.append(
     el("div", { class: "stack" }, [
@@ -646,21 +768,137 @@ function renderSession() {
 }
 
 let durationTimer = 0;
+let countdownShown = 0;
 function armDuration() {
   clearInterval(durationTimer);
   durationTimer = setInterval(() => {
     const node = document.querySelector("[data-testid=duration-clock]");
+    const label = document.querySelector("[data-testid=countdown-label]");
     const step = currentStep();
-    if (!node || !step || !state.active) return;
-    node.textContent = liveDurationText(state.active, step);
-  }, 250);
+    if (!node || !step || !state.active || state.active.phase !== "step") return;
+    const left = countdownLeft(state.active, step, Date.now());
+    if (left !== countdownShown) {
+      const previous = countdownShown;
+      countdownShown = left;
+      if (left > 0) {
+        beep(660, 0.08);
+        buzz(60);
+      } else if (previous > 0) {
+        beep(1046, 0.35);
+        buzz(250);
+      }
+    }
+    node.dataset.countdown = String(left);
+    node.className = left ? "clock countdown" : "clock";
+    node.textContent = left ? String(left) : liveDurationText(state.active, step);
+    const remaining = left ? null : workSecondsLeft(state.active, step, Date.now());
+    if (remaining != null && remaining <= 0) {
+      node.dataset.ended = "true";
+      onWorkTimerZero(state.active, step);
+      return;
+    }
+    if (label) {
+      label.textContent = left ? "Gör dig redo – tiden startar om" : "Tiden går";
+      label.className = left ? "countdown-label" : "countdown-label running";
+    }
+  }, 100);
+}
+
+async function restartCountdown() {
+  if (!state.active || state.active.phase !== "step") return;
+  unlockAudio();
+  const session = { ...state.active, stepStartedAt: Date.now() + COUNTDOWN_MS };
+  try {
+    await saveSession(session);
+  } catch {
+    state.persistError = "Kunde inte spara omstarten. Tiden är oförändrad.";
+  }
+  render();
 }
 
 function liveDurationText(session, step) {
-  const elapsed = elapsedSeconds(session.stepStartedAt, Date.now());
-  const left = step.durationSeconds - elapsed;
+  const left = workSecondsLeft(session, step, Date.now());
   if (left >= 0) return formatClock(left * 1000);
   return `Över tid ${formatClock(-left * 1000)}`;
+}
+
+let endSignaledFor = "";
+function timerEndKey(session) {
+  return `${session.id}:${session.stepIndex}:${session.stepStartedAt}`;
+}
+
+/** Called by the step timer once the work time reaches zero. */
+function onWorkTimerZero(session, step) {
+  const key = timerEndKey(session);
+  if (endSignaledFor === key) return;
+  endSignaledFor = key;
+  beep(1046, 0.5);
+  buzz(400);
+  const kind = timerKind(step);
+  const label = document.querySelector("[data-testid=countdown-label]");
+  if (kind === "auto") {
+    if (label) label.textContent = "Tiden är slut – går vidare";
+    autoCompleteTimed(step).catch(() => {});
+  } else if (kind === "stop") {
+    if (label) {
+      label.textContent = "Tiden är slut – tryck Klar";
+      label.className = "countdown-label done";
+    }
+  } else if (label) {
+    label.textContent = "Övertid – förläng gärna stretchen";
+  }
+}
+
+/** Save an auto-ending timed step (no weight, no reps) and move on, like Klar. */
+async function autoCompleteTimed(step) {
+  if (state.saving || !state.active || state.active.phase !== "step" || currentStep() !== step) return;
+  if (document.querySelector("dialog[open]")) return; // the Klar dialog wins
+  state.saving = true;
+  const built = buildActual(step, { weight: "", reps: "", rir: "", elapsedSeconds: step.durationSeconds });
+  if (!built.ok) {
+    state.saving = false;
+    return;
+  }
+  const event = completionEvent({
+    sessionId: state.active.id,
+    step,
+    actual: built.actual,
+    nowIso: new Date().toISOString(),
+    meta: {
+      sessionTitle: state.active.title,
+      catalogId: state.active.catalogId,
+      planId: state.active.planId,
+      sessionType: state.active.sessionType,
+      planDemo: state.active.planDemo,
+    },
+  });
+  const next = state.active.stepIndex + 1;
+  const hasNext = next < state.active.planSnapshot.steps.length;
+  const useRest = hasNext && (step.restSeconds || 0) > 0;
+  const session = {
+    ...state.active,
+    phase: useRest ? "rest" : hasNext ? "step" : "done",
+    stepIndex: useRest ? state.active.stepIndex : hasNext ? next : state.active.stepIndex,
+    rest: useRest ? startRest(Date.now(), step.restSeconds) : null,
+    stepStartedAt: useRest ? state.active.stepStartedAt : hasNext ? stepStartTime(state.active.planSnapshot.steps[next], Date.now()) : Date.now(),
+    revisions: { ...state.active.revisions, [step.id]: event.eventId },
+  };
+  const bundle = [event];
+  if (session.phase === "done") {
+    const marker = markerForFinish(session, [event]);
+    if (marker) bundle.push(marker);
+  }
+  try {
+    await atomicWrite(session, bundle);
+    state.persistError = "";
+    if (session.phase === "done") await releaseWake();
+  } catch {
+    state.persistError = "Steget kunde inte sparas automatiskt. Tryck Klar.";
+  } finally {
+    state.saving = false;
+  }
+  render();
+  flush().catch(() => {});
 }
 
 function prefill(step) {
@@ -675,7 +913,8 @@ function prefill(step) {
   const draft = state.active.drafts?.[step.id] || {};
   const weight = draft.weight != null ? draft.weight : step.load?.value == null ? "" : kgText(step.load.value);
   const reps = draft.reps != null ? draft.reps : step.reps?.target == null ? "" : String(step.reps.target);
-  const rir = draft.rir != null ? draft.rir : step.rir == null ? "" : String(step.rir);
+  // RIR is never prefilled from the plan: an empty field means "not estimated".
+  const rir = draft.rir != null ? draft.rir : "";
   return { weight, reps, rir };
 }
 
@@ -697,7 +936,12 @@ function openDialog(forcedStep = null, forcedSession = null) {
     text("p", `Föreskrivet: ${weightLine(step)}. ${repsLine(step)}.`),
     step.load ? el("label", {}, ["Utförd vikt (kg)", weight]) : text("p", "Ingen vikt på det här steget."),
     step.reps ? el("label", {}, ["Utförda reps", reps]) : null,
-    el("label", {}, ["Utförd RIR (tom = ingen)", rir]),
+    rirApplies(step)
+      ? el("details", { class: "rir-details", "data-testid": "rir-details" }, [
+          text("summary", "RIR (valfritt, behövs inte)"),
+          el("label", {}, ["Utförd RIR", rir]),
+        ])
+      : null,
     text("p", `Förfluten tid: ${elapsed} s`, { "data-testid": "elapsed" }),
     error,
     el("button", { class: "confirm", type: "button", "data-testid": "confirm", onclick: () => confirmDialog(dialog, { weight, reps, rir }) }, ["Klar – spara dessa värden"]),
@@ -780,7 +1024,7 @@ async function confirmDialog(dialog, fields) {
         phase: useRest ? "rest" : hasNext ? "step" : "done",
         stepIndex: useRest ? state.active.stepIndex : hasNext ? next : state.active.stepIndex,
         rest: useRest ? startRest(Date.now(), step.restSeconds) : null,
-        stepStartedAt: useRest ? state.active.stepStartedAt : Date.now(),
+        stepStartedAt: useRest ? state.active.stepStartedAt : hasNext ? stepStartTime(state.active.planSnapshot.steps[next], Date.now()) : Date.now(),
         revisions: { ...state.active.revisions, [step.id]: event.eventId },
       };
   const bundle = [event];
@@ -889,7 +1133,7 @@ function renderRest() {
     text("p", `Fas: ${phaseLabel(nextStep.phase)}. Plats: ${nextStep.location}. Utrustning: ${equipmentLabel(nextStep.equipment)}.`),
     text("p", weightLine(nextStep)),
     text("p", repsLine(nextStep)),
-    text("p", `RIR: ${nextStep.rir == null ? "valfritt" : nextStep.rir}`),
+    rirLine(nextStep),
     nextStep.durationSeconds != null ? text("p", `Tid: ${nextStep.durationSeconds} s`) : null,
     nextStep.alternative ? text("p", `Alternativ: ${nextStep.alternative}`, { class: "muted", "data-testid": "step-alternative" }) : null,
     clock,
@@ -945,6 +1189,27 @@ function renderRest() {
   restTimer = setInterval(paint, 200);
 }
 
+function doneNextLine() {
+  const suggestion = currentSuggestion();
+  if (!suggestion.ok) return null;
+  return text("p", `Nästa gång: ${suggestion.catalog.id} ${suggestion.catalog.title}`, { class: "ok", "data-testid": "done-next" });
+}
+
+function progressionBlock(session) {
+  if (!session?.planSnapshot) return null;
+  const items = progressionForSession(session.planSnapshot.steps, state.events, session.id);
+  if (!items.length) return null;
+  const list = el("ul", { "data-testid": "progression-list" });
+  for (const item of items) {
+    list.append(el("li", { "data-decision": item.decision, "data-testid": "progression-row" }, [text("strong", item.exercise), ` – ${item.text}`]));
+  }
+  return el("div", { class: "progression", "data-testid": "progression" }, [
+    text("h3", "Nästa gång (efter vikt × reps)"),
+    text("p", "Bygger på utförda reps och vikt, inte på RIR.", { class: "muted small" }),
+    list,
+  ]);
+}
+
 function renderDone(session) {
   const events = state.events.filter((item) => item.sessionId === session?.id && (item.type === "completion" || item.type === "revision"));
   const list = el("ul", { "data-testid": "done-list" });
@@ -966,6 +1231,8 @@ function renderDone(session) {
     el("section", { class: "card", "data-testid": "done-view" }, [
       text("h2", "Passet är klart"),
       text("p", session?.title || ""),
+      doneNextLine(),
+      progressionBlock(session),
       text("p", "Korrektioner sparas som nya händelser. Gamla rader ändras inte.", { class: "muted" }),
       list,
       el("button", { class: "klar", type: "button", "data-testid": "back-home", onclick: async () => { await releaseWake(); state.active = null; state.focusId = null; render(); } }, ["Tillbaka"]),
@@ -1042,6 +1309,8 @@ async function saveSettings(fields) {
     state.settingsOk = "";
   }
   render();
+  if (state.remote?.targetKey !== targetKey()) state.remote = { markers: {}, fetchedAt: null, targetKey: "" };
+  refreshRemoteHistory().catch(() => {});
 }
 
 async function forgetToken() {
@@ -1091,6 +1360,7 @@ async function fetchPlan() {
   state.settingsError = "";
   state.settingsOk = formatPlanFetchOk(valid.plan, new Date(row.validatedAt));
   render();
+  refreshRemoteHistory().catch(() => {});
 }
 
 async function flush({ manual = false } = {}) {
