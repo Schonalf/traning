@@ -171,3 +171,4 @@ dialog::backdrop { background: rgba(28, 25, 21, 0.45); }
 .rir-details summary { cursor: pointer; padding: 0.3rem 0; }
 .progression h3 { font-size: 1rem; margin: 0.8rem 0 0.2rem; }
 .progression li { margin: 0.3rem 0; font-size: 0.92rem; }
+.countdown-label.done { color: var(--warn); }

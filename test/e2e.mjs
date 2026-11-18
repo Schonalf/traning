@@ -43,6 +43,7 @@ try {
     await runNextPass(browser);
     await runCountdown(browser);
     await runRirAndProgression(browser);
+    await runTimerEnd(browser);
   } finally {
     await browser.close();
   }
@@ -847,5 +848,68 @@ async function runRirAndProgression(browser) {
   );
   assert(events.length === 3 && events.every((e) => e.actual.rir === null), "sets saved without RIR");
   await page.screenshot({ path: `${shots}/progression.png`, fullPage: true });
+  await context.close();
+}
+
+async function runTimerEnd(browser) {
+  const plan = demoPlan();
+  plan.demo = true;
+  const k = plan.sessions.find((x) => x.id === "kondition");
+  const calf = plan.sessions.find((x) => x.id === "styrka-3").steps.find((x) => x.id === "s3-seated-calf");
+  const byId = Object.fromEntries(k.steps.map((x) => [x.id, x]));
+  k.steps = [
+    { ...byId["k-interval"], durationSeconds: 3, restSeconds: 2 },
+    { ...byId["k-recovery"], durationSeconds: 2, restSeconds: 0 },
+    { ...calf, id: "t-slow-calf", durationSeconds: 2, restSeconds: 0 },
+    { ...byId["k-mobility"], durationSeconds: 1, restSeconds: 0 },
+  ];
+  const { context, page } = await newPage(browser, { audio: true });
+  await page.goto(`${base}/#plan=${encodeURIComponent(JSON.stringify(plan))}`);
+  await startSessionFromHome(page, "kondition", "full");
+  await page.getByTestId("duration-clock").waitFor();
+  assert((await page.getByTestId("timer-hint").getAttribute("data-kind")) === "auto", "interval auto-ends");
+  let sawOvertime = false;
+  const watch = setInterval(async () => {
+    try {
+      const t = await page.locator("[data-testid=duration-clock]").innerText({ timeout: 50 });
+      if (t.includes("Över tid") && !(await page.getByTestId("exercise").innerText({ timeout: 50 })).includes("Rörlighet")) sawOvertime = true;
+    } catch {
+      /* view changing */
+    }
+  }, 150);
+  // Interval: 5 s countdown + 3 s work → rest view without overtime.
+  await page.getByTestId("rest-view").waitFor({ timeout: 12000 });
+  // Rest 2 s → recovery (auto) → slow calf set (stop).
+  await page.waitForFunction(() => document.querySelector("[data-testid=exercise]")?.textContent === "Sittande vadpress", null, { timeout: 20000 });
+  await page.waitForFunction(() => document.querySelector("[data-testid=duration-clock]")?.dataset.ended === "true", null, { timeout: 12000 });
+  clearInterval(watch);
+  assert(!sawOvertime, "no overtime on intervals or recovery");
+  assert((await page.getByTestId("duration-clock").innerText()) === "00:00", "rep set timer stops at 00:00");
+  assert((await page.getByTestId("countdown-label").innerText()).includes("Tiden är slut"), "end signalled");
+  await delay(1500);
+  assert((await page.getByTestId("duration-clock").innerText()) === "00:00", "still 00:00, no overtime");
+  assert((await page.getByTestId("exercise").innerText()) === "Sittande vadpress", "rep set waits for Klar");
+  const autoEvents = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const request = indexedDB.open("atlas-training-guided");
+        request.onsuccess = () => {
+          const tx = request.result.transaction("events").objectStore("events").getAll();
+          tx.onsuccess = () => resolve(tx.result.filter((row) => row.type === "completion"));
+        };
+      })
+  );
+  const ids = autoEvents.map((e) => e.stepId).sort();
+  assert(ids.join(",") === "k-interval,k-recovery", "auto-ended steps saved: " + ids);
+  assert(autoEvents.find((e) => e.stepId === "k-interval").actual.elapsedSeconds === 3, "elapsed equals planned time");
+  await page.getByTestId("klar").click();
+  await page.getByTestId("actual-reps").fill("12");
+  await page.getByTestId("confirm").click();
+  // Stretch: overtime is allowed.
+  await page.waitForFunction(() => document.querySelector("[data-testid=duration-clock]")?.textContent.includes("Över tid"), null, { timeout: 12000 });
+  assert((await page.getByTestId("timer-hint").getAttribute("data-kind")) === "overtime", "stretch keeps overtime");
+  assert((await page.getByTestId("step-view").count()) === 1, "stretch stays until Klar");
+  const beeps = await page.evaluate(() => globalThis.__beeps);
+  assert(beeps >= 4 * 6, "countdown + end beeps: " + beeps);
   await context.close();
 }

@@ -1095,3 +1095,29 @@ test("effectiveSets ignores other sessions", () => {
   const map = effectiveSets([{ sessionId: "A", type: "completion", stepId: "x", eventId: "1" }, { sessionId: "B", type: "completion", stepId: "y", eventId: "2" }], "A");
   assert.deepEqual([...map.keys()], ["x"]);
 });
+
+// ---- Övertid bara för stretch/rörlighet ----
+import { timerKind, workSecondsLeft } from "../public/lib/engine.mjs";
+
+test("timer kind: overtime only for stretch/mobility", () => {
+  assert.equal(timerKind({ phase: "mobility", exercise: "90/90-höft", durationSeconds: 120 }), "overtime");
+  assert.equal(timerKind({ phase: "warmup", exercise: "Rörlighet höft och bröstkorg", durationSeconds: 20 }), "overtime");
+  assert.equal(timerKind({ phase: "cardio", exercise: "Assault bike – hård intervall 1/4", durationSeconds: 240, load: null, reps: null }), "auto");
+  assert.equal(timerKind({ phase: "recovery", exercise: "Assault bike – lugnt", durationSeconds: 180 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Sidplanka – vänster", durationSeconds: 30 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Häng i stång", durationSeconds: 30 }), "auto");
+  assert.equal(timerKind({ phase: "warmup", exercise: "Assault bike – lugn uppvärmning", durationSeconds: 600 }), "auto");
+  assert.equal(timerKind({ phase: "work", exercise: "Sittande vadlyft", durationSeconds: 56, load: { value: 17.5 }, reps: { min: 8, max: 12 } }), "stop");
+  assert.equal(timerKind({ phase: "work", exercise: "Bänkpress", durationSeconds: null }), null);
+});
+
+test("timer: non-stretch stops at 0, stretch runs into overtime", () => {
+  const session = { stepStartedAt: 0 };
+  const interval = { phase: "cardio", exercise: "Intervall", durationSeconds: 240 };
+  const stretch = { phase: "mobility", exercise: "90/90-höft", durationSeconds: 120 };
+  assert.equal(workSecondsLeft(session, interval, 100_000), 140);
+  assert.equal(workSecondsLeft(session, interval, 240_000), 0);
+  assert.equal(workSecondsLeft(session, interval, 300_000), 0, "no negative time for intervals");
+  assert.equal(workSecondsLeft(session, stretch, 150_000), -30, "stretch may run over");
+  assert.equal(workSecondsLeft({ stepStartedAt: 5000 }, interval, 1000), 240, "countdown is not work time");
+});

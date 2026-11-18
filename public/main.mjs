@@ -1,7 +1,7 @@
 import { demoPlan } from "./lib/demo-plan.mjs";
 import { loadModeLabel, sideLabel } from "./lib/equipment.mjs";
 import { buildBackup } from "./lib/export.mjs";
-import { COUNTDOWN_MS, advancedAfterRest, buildActual, completionEvent, countdownLeft, newId, sessionCompletedEvent, skippedSession, stepStartTime } from "./lib/engine.mjs";
+import { COUNTDOWN_MS, advancedAfterRest, buildActual, completionEvent, countdownLeft, newId, sessionCompletedEvent, skippedSession, stepStartTime, timerKind, workSecondsLeft } from "./lib/engine.mjs";
 import { fetchCompletedMarkers, formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
 import { progressionForSession, rirApplies } from "./lib/progression.mjs";
 import { localHistory, markerToHistory, mergeHistory, orderedSessions, shortDate, suggestNext } from "./lib/rotation.mjs";
@@ -48,7 +48,7 @@ const state = {
   remoteStatus: "idle",
 };
 
-const APP_VERSION = "2026-11-18-nasta-pass-nedrakning-rir";
+const APP_VERSION = "2026-11-18-nasta-pass-nedrakning-rir-tid";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -743,7 +743,13 @@ function renderSession() {
     if (!left) countdownShown = 0;
     card.insertBefore(text("p", left ? "Gör dig redo – tiden startar om" : "Tiden går", { class: left ? "countdown-label" : "countdown-label running", "data-testid": "countdown-label" }), prescribed);
     card.insertBefore(text("p", left ? String(left) : liveDurationText(session, step), { class: left ? "clock countdown" : "clock", "data-testid": "duration-clock", "data-countdown": String(left) }), prescribed);
-    card.append(text("p", "Nedräkningen går inte vidare själv. Tryck Klar när du är färdig.", { class: "muted" }));
+    const kind = timerKind(step);
+    const hint = kind === "overtime"
+      ? "Stretch: tiden får gå över om du vill förlänga. Tryck Klar när du är färdig."
+      : kind === "auto"
+        ? "Vid noll piper appen, sparar steget och går vidare själv. Klar avslutar tidigare."
+        : "Tiden stannar på noll. Tryck Klar och fyll i reps.";
+    card.append(text("p", hint, { class: "muted", "data-testid": "timer-hint", "data-kind": kind }));
     card.append(el("button", { class: "ghost", type: "button", "data-testid": "restart-countdown", onclick: restartCountdown }, ["Starta om tiden (5 s nedräkning)"]));
   }
   card.append(
@@ -785,6 +791,12 @@ function armDuration() {
     node.dataset.countdown = String(left);
     node.className = left ? "clock countdown" : "clock";
     node.textContent = left ? String(left) : liveDurationText(state.active, step);
+    const remaining = left ? null : workSecondsLeft(state.active, step, Date.now());
+    if (remaining != null && remaining <= 0) {
+      node.dataset.ended = "true";
+      onWorkTimerZero(state.active, step);
+      return;
+    }
     if (label) {
       label.textContent = left ? "Gör dig redo – tiden startar om" : "Tiden går";
       label.className = left ? "countdown-label" : "countdown-label running";
@@ -805,10 +817,88 @@ async function restartCountdown() {
 }
 
 function liveDurationText(session, step) {
-  const elapsed = elapsedSeconds(session.stepStartedAt, Date.now());
-  const left = step.durationSeconds - elapsed;
+  const left = workSecondsLeft(session, step, Date.now());
   if (left >= 0) return formatClock(left * 1000);
   return `Över tid ${formatClock(-left * 1000)}`;
+}
+
+let endSignaledFor = "";
+function timerEndKey(session) {
+  return `${session.id}:${session.stepIndex}:${session.stepStartedAt}`;
+}
+
+/** Called by the step timer once the work time reaches zero. */
+function onWorkTimerZero(session, step) {
+  const key = timerEndKey(session);
+  if (endSignaledFor === key) return;
+  endSignaledFor = key;
+  beep(1046, 0.5);
+  buzz(400);
+  const kind = timerKind(step);
+  const label = document.querySelector("[data-testid=countdown-label]");
+  if (kind === "auto") {
+    if (label) label.textContent = "Tiden är slut – går vidare";
+    autoCompleteTimed(step).catch(() => {});
+  } else if (kind === "stop") {
+    if (label) {
+      label.textContent = "Tiden är slut – tryck Klar";
+      label.className = "countdown-label done";
+    }
+  } else if (label) {
+    label.textContent = "Övertid – förläng gärna stretchen";
+  }
+}
+
+/** Save an auto-ending timed step (no weight, no reps) and move on, like Klar. */
+async function autoCompleteTimed(step) {
+  if (state.saving || !state.active || state.active.phase !== "step" || currentStep() !== step) return;
+  if (document.querySelector("dialog[open]")) return; // the Klar dialog wins
+  state.saving = true;
+  const built = buildActual(step, { weight: "", reps: "", rir: "", elapsedSeconds: step.durationSeconds });
+  if (!built.ok) {
+    state.saving = false;
+    return;
+  }
+  const event = completionEvent({
+    sessionId: state.active.id,
+    step,
+    actual: built.actual,
+    nowIso: new Date().toISOString(),
+    meta: {
+      sessionTitle: state.active.title,
+      catalogId: state.active.catalogId,
+      planId: state.active.planId,
+      sessionType: state.active.sessionType,
+      planDemo: state.active.planDemo,
+    },
+  });
+  const next = state.active.stepIndex + 1;
+  const hasNext = next < state.active.planSnapshot.steps.length;
+  const useRest = hasNext && (step.restSeconds || 0) > 0;
+  const session = {
+    ...state.active,
+    phase: useRest ? "rest" : hasNext ? "step" : "done",
+    stepIndex: useRest ? state.active.stepIndex : hasNext ? next : state.active.stepIndex,
+    rest: useRest ? startRest(Date.now(), step.restSeconds) : null,
+    stepStartedAt: useRest ? state.active.stepStartedAt : hasNext ? stepStartTime(state.active.planSnapshot.steps[next], Date.now()) : Date.now(),
+    revisions: { ...state.active.revisions, [step.id]: event.eventId },
+  };
+  const bundle = [event];
+  if (session.phase === "done") {
+    const marker = markerForFinish(session, [event]);
+    if (marker) bundle.push(marker);
+  }
+  try {
+    await atomicWrite(session, bundle);
+    state.persistError = "";
+    if (session.phase === "done") await releaseWake();
+  } catch {
+    state.persistError = "Steget kunde inte sparas automatiskt. Tryck Klar.";
+  } finally {
+    state.saving = false;
+  }
+  render();
+  flush().catch(() => {});
 }
 
 function prefill(step) {
