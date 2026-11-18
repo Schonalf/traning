@@ -21,6 +21,7 @@ const files = [
   "lib/sync.mjs",
   "lib/session-plan.mjs",
   "lib/rotation.mjs",
+  "lib/progression.mjs",
 ];
 
 await rm(docs, { recursive: true, force: true });

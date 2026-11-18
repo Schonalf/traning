@@ -165,3 +165,9 @@ dialog::backdrop { background: rgba(28, 25, 21, 0.45); }
   color: var(--warn);
   margin: 0.3rem 0;
 }
+
+/* RIR valfritt, sekundärt */
+.rir-details { font-size: 0.85rem; color: var(--muted); margin: 0.3rem 0; }
+.rir-details summary { cursor: pointer; padding: 0.3rem 0; }
+.progression h3 { font-size: 1rem; margin: 0.8rem 0 0.2rem; }
+.progression li { margin: 0.3rem 0; font-size: 0.92rem; }

@@ -362,7 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
-  assert.match(sw, /CACHE_PREFIX\}v8/);
+  assert.match(sw, /CACHE_PREFIX\}v9/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -1016,4 +1016,82 @@ test("rotation: short Swedish date without trailing dot", async () => {
   const { shortDate } = await import("../public/lib/rotation.mjs");
   assert.equal(shortDate("2026-11-10T11:00:00.000Z"), "10 nov");
   assert.equal(shortDate("nope"), "okänt datum");
+});
+
+// ---- RIR valfritt + progression efter vikt × reps ----
+import { effectiveSets, progressionForSession, rirApplies, weightStep } from "../public/lib/progression.mjs";
+
+test("RIR only applies to strength work sets", () => {
+  assert.equal(rirApplies({ phase: "work", reps: { min: 8, max: 10 } }), true);
+  assert.equal(rirApplies({ phase: "warmup", reps: { min: 8, max: 8 } }), false);
+  assert.equal(rirApplies({ phase: "cardio", durationSeconds: 240 }), false);
+  assert.equal(rirApplies({ phase: "mobility", durationSeconds: 120 }), false);
+  assert.equal(rirApplies({ phase: "work", reps: null, durationSeconds: 30 }), false, "holds have no RIR");
+  const hold = { id: "h", phase: "work", equipment: "bodyweight", load: null, reps: null, durationSeconds: 30 };
+  assert.equal(buildActual(hold, { rir: "2" }).actual.rir, null, "RIR dropped on a hold");
+  const work = { id: "w", phase: "work", equipment: "barbell", load: { unit: "kg", mode: "total", value: 60 }, reps: { min: 5, max: 8, target: 5 } };
+  const noRir = buildActual(work, { weight: "60", reps: "8", rir: "" });
+  assert.equal(noRir.ok, true, "RIR never required");
+  assert.equal(noRir.actual.rir, null);
+});
+
+test("weight steps use only confirmed increments", () => {
+  assert.equal(weightStep("dumbbell", 30, 1), 2.5);
+  assert.equal(weightStep("dumbbell", 10, 1), 2.5);
+  assert.equal(weightStep("dumbbell", 8, 1), null);
+  assert.equal(weightStep("dumbbell", 12.5, -1), 2.5);
+  assert.equal(weightStep("dumbbell", 10, -1), null);
+  assert.equal(weightStep("barbell", 60, 1), 2.5);
+  assert.equal(weightStep("lat", 59, 1), 7);
+  assert.equal(weightStep("lat", 66, 1), null);
+  assert.equal(weightStep("machine", 100, 1), null);
+});
+
+function progSession(reps, { weight = 30, equipment = "dumbbell", priority = 2, durationSeconds = null, rir = null, revise = null } = {}) {
+  const steps = reps.map((_, i) => ({ id: `p${i}`, exercise: "Lutande hantelpress", phase: "work", equipment, load: { unit: "kg", mode: "per_hand", value: weight }, reps: { min: 8, max: 10, target: 8 }, rir: 2, priority, durationSeconds }));
+  steps.unshift({ id: "wu", exercise: "Lutande hantelpress", phase: "warmup", equipment, load: { unit: "kg", mode: "per_hand", value: 17.5 }, reps: { min: 3, max: 3, target: 3 }, rir: null, priority });
+  const events = [{ eventId: "e-wu", sessionId: "S", type: "completion", stepId: "wu", actual: { weightKg: 17.5, reps: 3, rir: null } }];
+  reps.forEach((r, i) => events.push({ eventId: `e${i}`, sessionId: "S", type: "completion", stepId: `p${i}`, actual: { weightKg: weight, reps: r, rir } }));
+  if (revise) events.push({ eventId: "rev", sessionId: "S", type: "revision", stepId: revise.stepId, revisesEventId: revise.of, actual: { weightKg: weight, reps: revise.reps, rir: null } });
+  return progressionForSession(steps, events, "S");
+}
+
+test("double progression: all sets at top → +2,5 kg, no RIR needed", () => {
+  const [p] = progSession([10, 10]);
+  assert.equal(p.decision, "increase");
+  assert.equal(p.nextKg, 32.5);
+  assert.equal(p.sets, 2, "warmup is not a work set");
+  assert.match(p.text, /32,5 kg/);
+});
+
+test("double progression: RIR value does not change the decision", () => {
+  assert.equal(progSession([10, 10], { rir: 4 })[0].decision, "increase");
+  assert.equal(progSession([10, 10], { rir: 0 })[0].decision, "increase");
+  assert.equal(progSession([9, 8], { rir: 0 })[0].decision, "reps");
+});
+
+test("double progression: within range keep + reps, some below keep, all below reduce", () => {
+  assert.equal(progSession([10, 9])[0].decision, "reps");
+  assert.equal(progSession([9, 7])[0].decision, "keep");
+  const down = progSession([6, 5])[0];
+  assert.equal(down.decision, "reduce");
+  assert.equal(down.nextKg, 27.5);
+});
+
+test("double progression: revision replaces the revised set", () => {
+  assert.equal(progSession([10, 10], { revise: { stepId: "p1", of: "e1", reps: 9 } })[0].decision, "reps");
+});
+
+test("double progression: unknown step and rehab caveat", () => {
+  const machine = progSession([10, 10], { equipment: "machine", weight: 100 })[0];
+  assert.equal(machine.decision, "increase");
+  assert.equal(machine.nextKg, null);
+  assert.match(machine.text, /inte känt/);
+  const rehab = progSession([10, 10], { priority: 1, durationSeconds: 56, weight: 17.5 })[0];
+  assert.match(rehab.text, /smärtan var ≤3\/10/);
+});
+
+test("effectiveSets ignores other sessions", () => {
+  const map = effectiveSets([{ sessionId: "A", type: "completion", stepId: "x", eventId: "1" }, { sessionId: "B", type: "completion", stepId: "y", eventId: "2" }], "A");
+  assert.deepEqual([...map.keys()], ["x"]);
 });

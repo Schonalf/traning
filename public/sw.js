@@ -16,10 +16,11 @@ const ALLOW = new Set([
   "lib/sync.mjs",
   "lib/session-plan.mjs",
   "lib/rotation.mjs",
+  "lib/progression.mjs",
 ]);
 
 const CACHE_PREFIX = `atlas-static-${encodeURIComponent(self.registration.scope)}-`;
-const CACHE = `${CACHE_PREFIX}v8`;
+const CACHE = `${CACHE_PREFIX}v9`;
 
 function scopePrefix() {
   const pathname = new URL(self.registration.scope).pathname;

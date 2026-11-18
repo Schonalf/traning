@@ -42,6 +42,7 @@ try {
     await runPreviewAndEarlyEnd(browser);
     await runNextPass(browser);
     await runCountdown(browser);
+    await runRirAndProgression(browser);
   } finally {
     await browser.close();
   }
@@ -245,6 +246,9 @@ async function runHappy(browser) {
   assert((await page.getByTestId("form-error").innerText()).includes("Ange vikt"), "null is not zero");
   await page.getByTestId("actual-weight").fill("0");
   await page.getByTestId("actual-reps").fill("5");
+  assert(!(await page.getByTestId("actual-rir").isVisible()), "RIR is collapsed by default");
+  assert((await page.getByTestId("actual-rir").inputValue()) === "", "RIR is never prefilled");
+  await page.locator("[data-testid=rir-details] summary").click();
   await page.getByTestId("actual-rir").fill("0");
   await page.getByTestId("confirm").click();
   await page.waitForFunction(() => document.querySelector("[data-testid=exercise]")?.textContent === "Bänkpress", null, { timeout: 12000 });
@@ -785,8 +789,10 @@ async function runCountdown(browser) {
   assert(beeps >= 5, "beep per countdown second and at start: " + beeps);
   await page.getByTestId("restart-countdown").click();
   await page.waitForFunction(() => ["4", "5"].includes(document.querySelector("[data-testid=duration-clock]")?.dataset.countdown), null, { timeout: 3000 });
-  // Klar → next timed step also gets the countdown.
+  // Klar → next timed step also gets the countdown. Mobility/cardio has no RIR field.
+  assert((await page.getByTestId("rir-line").count()) === 0, "no RIR line on mobility");
   await page.getByTestId("klar").click();
+  assert((await page.getByTestId("rir-details").count()) === 0, "no RIR field on mobility");
   await page.getByTestId("confirm").click();
   await page.getByText("Intervallarbete").waitFor();
   assert(/^[345]$/.test(await page.getByTestId("duration-clock").innerText()), "next timed step counts down too");
@@ -799,4 +805,47 @@ async function runCountdown(browser) {
   await second.page.getByTestId("step-view").waitFor();
   assert((await second.page.getByTestId("countdown-label").count()) === 0, "no countdown on rep-based set");
   await second.context.close();
+}
+
+async function runRirAndProgression(browser) {
+  const { context, page } = await newPage(browser);
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.goto(base);
+  await startSessionFromHome(page, "styrka-1", "full");
+  // Warmup: no RIR field at all.
+  await page.getByTestId("klar").click();
+  assert((await page.getByTestId("rir-details").count()) === 0, "no RIR on warmup");
+  await page.getByTestId("actual-weight").fill("20");
+  await page.getByTestId("confirm").click();
+  // Work sets: RIR collapsed and optional; save without it.
+  for (let i = 0; i < 2; i += 1) {
+    await page.waitForFunction(() => document.querySelector("[data-testid=step-view]") || document.querySelector("[data-testid=rest-view]"));
+    if (await page.getByTestId("rest-view").count()) await page.getByTestId("step-view").waitFor({ timeout: 15000 });
+    await page.getByTestId("klar").click();
+    await page.getByTestId("rir-details").waitFor();
+    assert(!(await page.getByTestId("actual-rir").isVisible()), "RIR collapsed");
+    if (await page.getByTestId("actual-weight").inputValue() === "") await page.getByTestId("actual-weight").fill("60");
+    const repsMax = await page.evaluate(() => document.querySelector("[data-testid=klar-dialog]").textContent);
+    const m = repsMax.match(/Reps (\d+)–(\d+)/);
+    await page.getByTestId("actual-reps").fill(m ? m[2] : "8");
+    await page.screenshot({ path: `${shots}/klar-utan-rir.png` });
+    await page.getByTestId("confirm").click();
+  }
+  await page.getByTestId("done-view").waitFor({ timeout: 15000 });
+  await page.getByTestId("progression").waitFor();
+  const rows = await page.getByTestId("progression-row").evaluateAll((els) => els.map((e) => e.dataset.decision));
+  assert(rows.length >= 1 && rows.every((d) => d === "increase"), "top of range → increase without RIR: " + rows);
+  const events = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const request = indexedDB.open("atlas-training-guided");
+        request.onsuccess = () => {
+          const tx = request.result.transaction("events").objectStore("events").getAll();
+          tx.onsuccess = () => resolve(tx.result.filter((row) => row.type === "completion"));
+        };
+      })
+  );
+  assert(events.length === 3 && events.every((e) => e.actual.rir === null), "sets saved without RIR");
+  await page.screenshot({ path: `${shots}/progression.png`, fullPage: true });
+  await context.close();
 }

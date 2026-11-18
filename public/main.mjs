@@ -3,6 +3,7 @@ import { loadModeLabel, sideLabel } from "./lib/equipment.mjs";
 import { buildBackup } from "./lib/export.mjs";
 import { COUNTDOWN_MS, advancedAfterRest, buildActual, completionEvent, countdownLeft, newId, sessionCompletedEvent, skippedSession, stepStartTime } from "./lib/engine.mjs";
 import { fetchCompletedMarkers, formatPlanFetchError, formatPlanFetchOk, getContentJson, planPath, validateTarget } from "./lib/github.mjs";
+import { progressionForSession, rirApplies } from "./lib/progression.mjs";
 import { localHistory, markerToHistory, mergeHistory, orderedSessions, shortDate, suggestNext } from "./lib/rotation.mjs";
 import { elapsedSeconds, formatClock, startRest, tickRest } from "./lib/rest.mjs";
 import { decodePlanFragment, validatePlan } from "./lib/schema.mjs";
@@ -47,7 +48,7 @@ const state = {
   remoteStatus: "idle",
 };
 
-const APP_VERSION = "2026-11-18-nasta-pass";
+const APP_VERSION = "2026-11-18-nasta-pass-nedrakning-rir";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -227,6 +228,11 @@ function statusMessage() {
   if (state.pause === "rate") pause = " Väntar efter hastighetsgräns.";
   const note = state.syncNote ? ` ${state.syncNote}` : "";
   return `${offline}Sparat på telefonen: ${saved}. Väntar på server: ${pending}. Bekräftat av servern: ${acked}.${pause}${note}`;
+}
+
+function rirLine(step) {
+  if (!rirApplies(step)) return null;
+  return text("p", `RIR (valfritt): ${step.rir == null ? "–" : step.rir}`, { class: "muted small", "data-testid": "rir-line" });
 }
 
 function phaseLabel(phase) {
@@ -722,7 +728,7 @@ function renderSession() {
     text("p", `Utrustning: ${equipmentLabel(step.equipment)}`),
     text("p", weightLine(step)),
     text("p", repsLine(step)),
-    text("p", `RIR: ${step.rir == null ? "valfritt" : step.rir}`),
+    rirLine(step),
     step.durationSeconds != null ? text("p", `Tid: ${step.durationSeconds} s`, { "data-testid": "duration-prescribed" }) : null,
     step.notes ? text("p", step.notes, { class: "muted" }) : null,
     ...stepExtraLines(step),
@@ -817,7 +823,8 @@ function prefill(step) {
   const draft = state.active.drafts?.[step.id] || {};
   const weight = draft.weight != null ? draft.weight : step.load?.value == null ? "" : kgText(step.load.value);
   const reps = draft.reps != null ? draft.reps : step.reps?.target == null ? "" : String(step.reps.target);
-  const rir = draft.rir != null ? draft.rir : step.rir == null ? "" : String(step.rir);
+  // RIR is never prefilled from the plan: an empty field means "not estimated".
+  const rir = draft.rir != null ? draft.rir : "";
   return { weight, reps, rir };
 }
 
@@ -839,7 +846,12 @@ function openDialog(forcedStep = null, forcedSession = null) {
     text("p", `Föreskrivet: ${weightLine(step)}. ${repsLine(step)}.`),
     step.load ? el("label", {}, ["Utförd vikt (kg)", weight]) : text("p", "Ingen vikt på det här steget."),
     step.reps ? el("label", {}, ["Utförda reps", reps]) : null,
-    el("label", {}, ["Utförd RIR (tom = ingen)", rir]),
+    rirApplies(step)
+      ? el("details", { class: "rir-details", "data-testid": "rir-details" }, [
+          text("summary", "RIR (valfritt, behövs inte)"),
+          el("label", {}, ["Utförd RIR", rir]),
+        ])
+      : null,
     text("p", `Förfluten tid: ${elapsed} s`, { "data-testid": "elapsed" }),
     error,
     el("button", { class: "confirm", type: "button", "data-testid": "confirm", onclick: () => confirmDialog(dialog, { weight, reps, rir }) }, ["Klar – spara dessa värden"]),
@@ -1031,7 +1043,7 @@ function renderRest() {
     text("p", `Fas: ${phaseLabel(nextStep.phase)}. Plats: ${nextStep.location}. Utrustning: ${equipmentLabel(nextStep.equipment)}.`),
     text("p", weightLine(nextStep)),
     text("p", repsLine(nextStep)),
-    text("p", `RIR: ${nextStep.rir == null ? "valfritt" : nextStep.rir}`),
+    rirLine(nextStep),
     nextStep.durationSeconds != null ? text("p", `Tid: ${nextStep.durationSeconds} s`) : null,
     nextStep.alternative ? text("p", `Alternativ: ${nextStep.alternative}`, { class: "muted", "data-testid": "step-alternative" }) : null,
     clock,
@@ -1093,6 +1105,21 @@ function doneNextLine() {
   return text("p", `Nästa gång: ${suggestion.catalog.id} ${suggestion.catalog.title}`, { class: "ok", "data-testid": "done-next" });
 }
 
+function progressionBlock(session) {
+  if (!session?.planSnapshot) return null;
+  const items = progressionForSession(session.planSnapshot.steps, state.events, session.id);
+  if (!items.length) return null;
+  const list = el("ul", { "data-testid": "progression-list" });
+  for (const item of items) {
+    list.append(el("li", { "data-decision": item.decision, "data-testid": "progression-row" }, [text("strong", item.exercise), ` – ${item.text}`]));
+  }
+  return el("div", { class: "progression", "data-testid": "progression" }, [
+    text("h3", "Nästa gång (efter vikt × reps)"),
+    text("p", "Bygger på utförda reps och vikt, inte på RIR.", { class: "muted small" }),
+    list,
+  ]);
+}
+
 function renderDone(session) {
   const events = state.events.filter((item) => item.sessionId === session?.id && (item.type === "completion" || item.type === "revision"));
   const list = el("ul", { "data-testid": "done-list" });
@@ -1115,6 +1142,7 @@ function renderDone(session) {
       text("h2", "Passet är klart"),
       text("p", session?.title || ""),
       doneNextLine(),
+      progressionBlock(session),
       text("p", "Korrektioner sparas som nya händelser. Gamla rader ändras inte.", { class: "muted" }),
       list,
       el("button", { class: "klar", type: "button", "data-testid": "back-home", onclick: async () => { await releaseWake(); state.active = null; state.focusId = null; render(); } }, ["Tillbaka"]),

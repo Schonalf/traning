@@ -29,7 +29,9 @@ export function buildActual(step, form) {
     else reps = parsed.value;
   }
   let rir = null;
-  if (form.rir != null && String(form.rir).trim() !== "") {
+  // RIR is optional and only kept on strength work sets; never required to save.
+  const rirOk = step.phase === "work" && Boolean(step.reps);
+  if (rirOk && form.rir != null && String(form.rir).trim() !== "") {
     const parsed = parseLooseNumber(form.rir);
     if (!parsed.ok || !Number.isInteger(parsed.value) || parsed.value < 0 || parsed.value > 10) {
       errors.push("RIR måste vara heltal 0–10 eller tomt.");
