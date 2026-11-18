@@ -362,7 +362,7 @@ test("backup and service worker exclude tokens", () => {
   assert.match(sw, /ALLOW/);
   assert.match(sw, /atlas-static-/);
   assert.match(sw, /startsWith\(CACHE_PREFIX\)/);
-  assert.match(sw, /CACHE_PREFIX\}v10/);
+  assert.match(sw, /CACHE_PREFIX\}v11/);
   const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /connect-src 'self' https:\/\/api\.github\.com/);
   assert.equal(html.includes("fonts.googleapis"), false);
@@ -1120,4 +1120,79 @@ test("timer: non-stretch stops at 0, stretch runs into overtime", () => {
   assert.equal(workSecondsLeft(session, interval, 300_000), 0, "no negative time for intervals");
   assert.equal(workSecondsLeft(session, stretch, 150_000), -30, "stretch may run over");
   assert.equal(workSecondsLeft({ stepStartedAt: 5000 }, interval, 1000), 240, "countdown is not work time");
+});
+
+import {
+  DUCK_ALARM_SECONDS,
+  PAUSE_ALARM_SECONDS,
+  SAMPLE_RATE,
+  alarmSamples,
+  alarmSeconds,
+  encodeWav,
+  normalizeSignal,
+  preBeepFor,
+  preBeepSamples,
+  workEndIsFresh,
+} from "../public/lib/signal.mjs";
+
+test("rest alarm rings in a hidden tab when on time, never when stale", () => {
+  const rest = startRest(1_000, 10);
+  const hiddenOnTime = tickRest(rest, 12_000, { visible: false });
+  assert.equal(hiddenOnTime.beep, true);
+  const hiddenLate = tickRest(rest, 15_000, { visible: false });
+  assert.equal(hiddenLate.beep, false);
+});
+
+test("alarm clip lengths straddle Chromium's 5 s persistent/transient boundary", () => {
+  // > 5 s => persistent audio focus (music pauses); <= 5 s => transient duck.
+  assert.ok(PAUSE_ALARM_SECONDS > 5);
+  assert.ok(DUCK_ALARM_SECONDS <= 5);
+  assert.equal(alarmSeconds("pause"), PAUSE_ALARM_SECONDS);
+  assert.equal(alarmSeconds("duck"), DUCK_ALARM_SECONDS);
+  const pause = alarmSamples(alarmSeconds("pause"));
+  assert.ok(pause.length / SAMPLE_RATE > 5);
+  const duck = alarmSamples(alarmSeconds("duck"));
+  assert.ok(duck.length / SAMPLE_RATE <= 5);
+  assert.ok(preBeepSamples().length / SAMPLE_RATE < 1);
+});
+
+test("alarm is loud and repeats three times", () => {
+  const s = alarmSamples();
+  let peak = 0;
+  for (const v of s) peak = Math.max(peak, Math.abs(v));
+  assert.ok(peak > 0.85, `peak ${peak}`);
+  const loudAt = (sec) => {
+    const i = Math.floor(sec * SAMPLE_RATE);
+    let m = 0;
+    for (let k = i; k < i + 400; k += 1) m = Math.max(m, Math.abs(s[k]));
+    return m;
+  };
+  assert.ok(loudAt(0.05) > 0.5 && loudAt(1.35) > 0.5 && loudAt(2.65) > 0.5);
+  assert.ok(loudAt(1.1) < 0.01, "gap between bursts");
+  assert.ok(loudAt(5) < 0.01, "silent tail only pads duration");
+});
+
+test("wav encoding has a valid header and length", () => {
+  const wav = encodeWav(new Float32Array([0, 1, -1]));
+  const text = String.fromCharCode(...wav.slice(0, 4)) + String.fromCharCode(...wav.slice(8, 12));
+  assert.equal(text, "RIFFWAVE");
+  assert.equal(wav.length, 44 + 6);
+  const v = new DataView(wav.buffer);
+  assert.equal(v.getUint32(24, true), SAMPLE_RATE);
+  assert.equal(v.getInt16(46, true), 0x7fff);
+  assert.equal(v.getInt16(48, true), -0x8000);
+});
+
+test("signal settings normalize and pre-beeps only on 3-2-1", () => {
+  assert.deepEqual(normalizeSignal(undefined), { enabled: true, volume: "high", music: "pause" });
+  assert.deepEqual(normalizeSignal({ enabled: false, volume: "low", music: "duck" }), { enabled: false, volume: "low", music: "duck" });
+  assert.deepEqual(normalizeSignal({ volume: "loud", music: "x" }), { enabled: true, volume: "high", music: "pause" });
+  assert.deepEqual([5, 4, 3, 2, 1, 0].map(preBeepFor), [false, false, true, true, true, false]);
+});
+
+test("work-timer alarm is skipped when stale", () => {
+  assert.equal(workEndIsFresh(0), true);
+  assert.equal(workEndIsFresh(-2), true);
+  assert.equal(workEndIsFresh(-10), false);
+  assert.equal(workEndIsFresh(5), false);
 });

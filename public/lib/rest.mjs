@@ -13,7 +13,7 @@ export function startRest(now, restSeconds) {
   };
 }
 
-export function tickRest(state, now, { visible }) {
+export function tickRest(state, now, _opts = {}) {
   const next = { ...state };
   if (!state || state.durationMs <= 0) {
     return { state: next, displayMs: 0, beep: false, advance: true };
@@ -38,8 +38,11 @@ export function tickRest(state, now, { visible }) {
   next.lastRemainingMs = 0;
   let beep = false;
   if (!state.signaled) {
+    // Ring also when the tab is hidden, as long as the deadline was just now:
+    // the alarm is meant to reach someone listening to music. A late tick
+    // (suspended tab, returning minutes later) never rings.
     const late = now - state.deadline;
-    const stale = !visible || late > STALE_MS;
+    const stale = late > STALE_MS;
     next.signaled = true;
     beep = !stale;
   }
